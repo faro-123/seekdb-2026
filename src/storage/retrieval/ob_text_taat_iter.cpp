@@ -67,7 +67,7 @@ void ObTextTaaTIter::reuse(const bool switch_tablet)
 int ObTextTaaTIter::pre_process()
 {
   int ret = OB_SUCCESS;
-  {
+  if (iter_param_->need_project_relevance()) {
     const bool is_first_estimation = !bm25_param_estimator_.is_estimated();
     if (!is_first_estimation) {
       // skip
