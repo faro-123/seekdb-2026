@@ -39,8 +39,12 @@ public:
   void reset();
 
   int hash(uint64_t &hash_val) const;
-  const common::ObDatum &get_datum() const;
-  int from_datum(const common::ObDatum &datum);
+  const common::ObDatum &get_datum() const { return datum_; }
+  int from_datum(const common::ObDatum &datum)
+  {
+    int64_t pos = 0;
+    return datum_.deep_copy(datum, buf_, OB_DOC_ID_EXT_SIZE, pos);
+  }
   int from_obj(const common::ObObj &obj);
 
   ObDocIdExt &operator=(const ObDocIdExt &other);

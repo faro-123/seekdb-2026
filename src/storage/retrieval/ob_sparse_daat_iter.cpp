@@ -419,7 +419,25 @@ int ObSRDaaTIterImpl::project_results(const int64_t count)
   ObEvalCtx *eval_ctx = iter_param_->eval_ctx_;
   ObEvalCtx::BatchInfoScopeGuard guard(*eval_ctx);
 
-  if (eval_ctx->is_vectorized()) {
+  if (eval_ctx->is_vectorized() && id_proj_expr->is_batch_result()
+      && !iter_param_->need_project_relevance()) {
+    // Membership retrieval produces a dense batch. Resolve its output frame
+    // and mark it evaluated once, rather than updating the batch index and
+    // expression state for every document. Keep the owned ID buffers alive
+    // until the consumer has finished with this batch.
+    ObDatum *id_datums = id_proj_expr->locate_datums_for_update(*eval_ctx, count);
+    if (set_datum_func_ == ObISparseRetrievalMergeIter::set_datum_int) {
+      for (int64_t i = 0; i < count; ++i) {
+        id_datums[i].set_int(buffered_domain_ids_[i].get_datum().get_int());
+      }
+    } else {
+      for (int64_t i = 0; i < count; ++i) {
+        id_datums[i].set_datum(buffered_domain_ids_[i].get_datum());
+      }
+    }
+    id_proj_expr->get_evaluated_flags(*eval_ctx).set_all(count);
+    id_proj_expr->set_evaluated_projected(*eval_ctx);
+  } else if (eval_ctx->is_vectorized()) {
     sql::ObBitVector &id_evaluated_flags = id_proj_expr->get_evaluated_flags(*eval_ctx);
     for (int64_t i = 0; i < count; ++i) {
       guard.set_batch_idx(i);
