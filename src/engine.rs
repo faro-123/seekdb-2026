@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::hot::HotCache;
-use crate::query::{self, Plan, Predicates, QueryFile};
+use crate::query::{self, Plan, Predicates, QueryResult};
 use crate::sql::{self, Statement};
 use crate::storage::{Catalog, Changes, LocatedRow, Op, Store};
 use crate::types::{DataType, Schema, coerce};
@@ -11,7 +11,7 @@ use crate::{Error, Result};
 pub(crate) enum Outcome {
     Ok,
     Affected(u64),
-    Query(QueryFile),
+    Query(QueryResult),
 }
 pub(crate) struct Engine {
     store: Store,

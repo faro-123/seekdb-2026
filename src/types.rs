@@ -49,15 +49,17 @@ impl Value {
         match self {
             Self::Int(x) => serde_json::to_writer(out, x)?,
             Self::Text(x) => serde_json::to_writer(out, x)?,
-            Self::Vector(x) => {
-                let mut serializer = serde_json::Serializer::new(out);
-                let mut seq = serializer.serialize_seq(Some(x.len()))?;
-                for value in x {
-                    seq.serialize_element(&f64::from(*value))?;
-                }
-                seq.end()?;
-            }
+            Self::Vector(x) => Self::write_vector_json(x, out)?,
         }
+        Ok(())
+    }
+    pub fn write_vector_json(vector: &[f32], out: &mut impl Write) -> Result<()> {
+        let mut serializer = serde_json::Serializer::new(out);
+        let mut seq = serializer.serialize_seq(Some(vector.len()))?;
+        for value in vector {
+            seq.serialize_element(&f64::from(*value))?;
+        }
+        seq.end()?;
         Ok(())
     }
     pub fn int(&self) -> Result<i64> {

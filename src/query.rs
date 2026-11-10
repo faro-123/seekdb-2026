@@ -3,7 +3,7 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeSet, BinaryHeap};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -296,6 +296,21 @@ impl Plan {
         covered.then_some(vector)
     }
 
+    fn inline_capacity(&self, schema: &Schema, limit: usize) -> Option<usize> {
+        // Bound the JSON for small numeric projections before allocating.
+        // A finite f64 or i64, including its delimiter, fits in 64 bytes.
+        const INLINE_BYTES: usize = 32 << 10;
+        if !self.projections.iter().all(|expr| match expr {
+            BoundExpr::Distance(..) => true,
+            BoundExpr::Column(i) => matches!(schema.columns[*i].kind, DataType::Bigint),
+        }) {
+            return None;
+        }
+        let row = self.projections.len().checked_mul(64)?.checked_add(3)?;
+        let bytes = row.checked_mul(limit)?.checked_add(2)?;
+        (bytes <= INLINE_BYTES).then_some(bytes)
+    }
+
     fn table_filter(&self) -> TableFilter<'_> {
         if self.limit.is_some()
             && self
@@ -504,26 +519,47 @@ fn merge(paths: &[PathBuf], mut emit: impl FnMut(Candidate) -> Result<bool>) -> 
     }
     Ok(())
 }
-pub(crate) struct QueryFile {
-    pub columns: Vec<String>,
-    pub path: PathBuf,
+enum Rows {
+    File(PathBuf),
+    Inline(Vec<u8>),
 }
-impl Drop for QueryFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+
+pub(crate) struct QueryResult {
+    pub columns: Vec<String>,
+    rows: Rows,
+}
+impl QueryResult {
+    pub fn write_rows(&self, out: &mut impl Write) -> std::io::Result<()> {
+        match &self.rows {
+            Rows::File(path) => std::io::copy(&mut File::open(path)?, out).map(|_| ()),
+            Rows::Inline(bytes) => out.write_all(bytes),
+        }
     }
 }
-struct RowWriter {
-    out: BufWriter<File>,
+impl Drop for QueryResult {
+    fn drop(&mut self) {
+        if let Rows::File(path) = &self.rows {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+struct RowWriter<W> {
+    out: W,
     count: usize,
 }
-impl RowWriter {
-    fn new(path: &Path) -> Result<Self> {
-        let mut out = BufWriter::new(File::create(path)?);
+impl<W: Write> RowWriter<W> {
+    fn new(mut out: W) -> Result<Self> {
         out.write_all(b"[")?;
         Ok(Self { out, count: 0 })
     }
     fn row(&mut self, projections: &[BoundExpr], row: &QueryRow) -> Result<()> {
+        self.row_with(projections, |expr, out| expr.write_json(row, out))
+    }
+    fn row_with(
+        &mut self,
+        projections: &[BoundExpr],
+        mut cell: impl FnMut(&BoundExpr, &mut W) -> Result<()>,
+    ) -> Result<()> {
         if self.count > 0 {
             self.out.write_all(b",")?;
         }
@@ -532,16 +568,16 @@ impl RowWriter {
             if i > 0 {
                 self.out.write_all(b",")?;
             }
-            projection.write_json(row, &mut self.out)?;
+            cell(projection, &mut self.out)?;
         }
         self.out.write_all(b"]")?;
         self.count += 1;
         Ok(())
     }
-    fn finish(mut self) -> Result<()> {
+    fn finish(mut self) -> Result<W> {
         self.out.write_all(b"]")?;
         self.out.flush()?;
-        Ok(())
+        Ok(self.out)
     }
 }
 
@@ -550,7 +586,7 @@ fn try_hot(
     schema: &Schema,
     store: &Store,
     cache: &mut HotCache,
-    writer: &mut RowWriter,
+    writer: &mut RowWriter<impl Write>,
 ) -> Result<bool> {
     let [(BoundExpr::Distance(embedding, q), false)] = &plan.order[..] else {
         return Ok(false);
@@ -587,17 +623,29 @@ fn try_hot(
     };
     for hit in hits {
         let row = table.row(hit.slot);
-        let projected = if let Some(source) = &mut source {
-            QueryRow::Full(source.read_at(Position::Committed(row.offset))?)
+        if let Some(source) = &mut source {
+            let projected = QueryRow::Full(source.read_at(Position::Committed(row.offset))?);
+            writer.row(&plan.projections, &projected)?;
         } else {
-            indexed_row(
-                row.key,
-                table.vector(hit.slot).to_vec(),
-                schema.primary,
-                *embedding,
-            )
-        };
-        writer.row(&plan.projections, &projected)?;
+            let vector = table.vector(hit.slot);
+            writer.row_with(&plan.projections, |projection, out| {
+                match projection {
+                    BoundExpr::Column(i) if *i == schema.primary => {
+                        serde_json::to_writer(out, &row.key)?;
+                    }
+                    BoundExpr::Column(_) => Value::write_vector_json(vector, out)?,
+                    BoundExpr::Distance(_, query) => {
+                        let distance = if query == q {
+                            hit.distance()
+                        } else {
+                            SquaredL2::between(vector, query).distance()
+                        };
+                        serde_json::to_writer(out, &distance)?;
+                    }
+                }
+                Ok(())
+            })?;
+        }
     }
     Ok(true)
 }
@@ -608,19 +656,35 @@ pub(crate) fn execute(
     transaction: Option<&Changes>,
     store: &mut Store,
     cache: &mut HotCache,
-) -> Result<QueryFile> {
-    let path = store.temp("response");
-    let result = QueryFile {
-        columns: plan.columns.clone(),
-        path,
-    };
-    let mut writer = RowWriter::new(&result.path)?;
+) -> Result<QueryResult> {
     let limit = plan.limit.unwrap_or(usize::MAX);
     if limit == 0 {
-        writer.finish()?;
-        return Ok(result);
+        return Ok(QueryResult {
+            columns: plan.columns,
+            rows: Rows::Inline(b"[]".to_vec()),
+        });
     }
-    if transaction.is_none() && try_hot(&plan, schema, store, cache, &mut writer)? {
+    let mut tried_hot = false;
+    if transaction.is_none()
+        && let Some(capacity) = plan.inline_capacity(schema, limit)
+    {
+        let mut writer = RowWriter::new(Vec::with_capacity(capacity))?;
+        if try_hot(&plan, schema, store, cache, &mut writer)? {
+            return Ok(QueryResult {
+                columns: plan.columns,
+                rows: Rows::Inline(writer.finish()?),
+            });
+        }
+        tried_hot = true;
+    }
+    let path = store.temp("response");
+    let file = File::create(&path)?;
+    let result = QueryResult {
+        columns: plan.columns.clone(),
+        rows: Rows::File(path),
+    };
+    let mut writer = RowWriter::new(BufWriter::new(file))?;
+    if transaction.is_none() && !tried_hot && try_hot(&plan, schema, store, cache, &mut writer)? {
         writer.finish()?;
         return Ok(result);
     }

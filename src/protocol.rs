@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 
@@ -38,7 +37,7 @@ fn respond(out: &mut impl Write, id: Option<&RawValue>, result: Result<Outcome>)
             out.write_all(b",\"ok\":true,\"columns\":")?;
             serde_json::to_writer(&mut *out, &query.columns)?;
             out.write_all(b",\"rows\":")?;
-            io::copy(&mut File::open(&query.path)?, out)?;
+            query.write_rows(out)?;
         }
         Err(error) => {
             out.write_all(b",\"ok\":false,\"error\":")?;

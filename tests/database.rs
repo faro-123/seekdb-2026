@@ -518,3 +518,19 @@ fn oversized_hot_build_row_falls_back_to_exact_wal_scan() {
     assert_eq!(r[3]["rows"], json!([[1], [2]]));
     assert_eq!(r[4]["rows"], json!([[2]]));
 }
+
+#[test]
+fn hot_distance_projection_uses_its_own_query_vector() {
+    let r = run(&[
+        "CREATE TABLE t (id BIGINT PRIMARY KEY,v VECTOR(2));",
+        "INSERT INTO t VALUES (1,'[0,0]'),(2,'[1,0]');",
+        "CREATE VECTOR INDEX vi ON t(v);",
+        "SELECT id,L2_DISTANCE(v,'[0,0]') AS d0,L2_DISTANCE(v,'[1,0]') AS d1 FROM t ORDER BY d0 LIMIT 2;",
+        "SELECT id,v,L2_DISTANCE(v,'[1,0]') AS d1 FROM t ORDER BY L2_DISTANCE(v,'[0,0]') LIMIT 2;",
+    ]);
+    assert_eq!(r[3]["rows"], json!([[1, 0.0, 1.0], [2, 1.0, 0.0]]));
+    assert_eq!(
+        r[4]["rows"],
+        json!([[1, [0.0, 0.0], 1.0], [2, [1.0, 0.0], 0.0]])
+    );
+}

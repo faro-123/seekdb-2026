@@ -48,6 +48,12 @@ pub(crate) struct Hit {
     pub slot: usize,
 }
 
+impl Hit {
+    pub fn distance(&self) -> f64 {
+        self.distance.distance()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Estimate(f64);
 
