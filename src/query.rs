@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::distance::SquaredL2;
+use crate::hot::{HotCache, HotTable, MAX_FIELDS, MAX_K};
 use crate::sql::{Condition, Expr, Select};
 use crate::storage::{Changes, Position, Store, VectorView, View};
 use crate::types::{DataType, Schema, Value, coerce, vector};
@@ -38,15 +39,14 @@ impl Predicates {
                 (Value::Text(a), Value::Text(b)) => a.cmp(b),
                 _ => return false,
             };
-            match op.as_str() {
-                "=" => cmp == Ordering::Equal,
-                "<" => cmp == Ordering::Less,
-                "<=" => cmp != Ordering::Greater,
-                ">" => cmp == Ordering::Greater,
-                ">=" => cmp != Ordering::Less,
-                _ => false,
-            }
+            compare(op, cmp)
         })
+    }
+
+    fn matches_hot(&self, table: &HotTable, slot: usize) -> bool {
+        self.0
+            .iter()
+            .all(|(column, op, wanted)| compare(op, table.compare(slot, *column, wanted)))
     }
 
     fn equalities(&self) -> Option<Vec<(usize, &Value)>> {
@@ -56,6 +56,17 @@ impl Predicates {
         let mut equalities: Vec<_> = self.0.iter().map(|(i, _, value)| (*i, value)).collect();
         equalities.sort_unstable_by_key(|&(i, _)| i);
         Some(equalities)
+    }
+}
+
+fn compare(op: &str, cmp: Ordering) -> bool {
+    match op {
+        "=" => cmp == Ordering::Equal,
+        "<" => cmp == Ordering::Less,
+        "<=" => cmp != Ordering::Greater,
+        ">" => cmp == Ordering::Greater,
+        ">=" => cmp != Ordering::Less,
+        _ => false,
     }
 }
 
@@ -533,11 +544,70 @@ impl RowWriter {
         Ok(())
     }
 }
+
+fn try_hot(
+    plan: &Plan,
+    schema: &Schema,
+    store: &Store,
+    cache: &mut HotCache,
+    writer: &mut RowWriter,
+) -> Result<bool> {
+    let [(BoundExpr::Distance(embedding, q), false)] = &plan.order[..] else {
+        return Ok(false);
+    };
+    let Some(k) = plan.limit.filter(|&k| k <= MAX_K) else {
+        return Ok(false);
+    };
+    if !schema.indexes.iter().any(|(_, i)| i == embedding) {
+        return Ok(false);
+    }
+    let mut fields = [0; MAX_FIELDS];
+    let mut count = 0;
+    for &(i, _, _) in &plan.predicates.0 {
+        if i != schema.primary && !fields[..count].contains(&i) {
+            if count == MAX_FIELDS {
+                return Ok(false);
+            }
+            fields[count] = i;
+            count += 1;
+        }
+    }
+    let Some(table) = cache.get(store, schema, *embedding, &fields[..count])? else {
+        return Ok(false);
+    };
+    let hits = table.select(q, k, |slot| plan.predicates.matches_hot(table, slot));
+    let covered = plan.projections.iter().all(|expr| {
+        let column = expr.column_index();
+        column == schema.primary || column == *embedding
+    });
+    let mut source = if covered || hits.is_empty() {
+        None
+    } else {
+        Some(store.view(&schema.name, None)?)
+    };
+    for hit in hits {
+        let row = table.row(hit.slot);
+        let projected = if let Some(source) = &mut source {
+            QueryRow::Full(source.read_at(Position::Committed(row.offset))?)
+        } else {
+            indexed_row(
+                row.key,
+                table.vector(hit.slot).to_vec(),
+                schema.primary,
+                *embedding,
+            )
+        };
+        writer.row(&plan.projections, &projected)?;
+    }
+    Ok(true)
+}
+
 pub(crate) fn execute(
     plan: Plan,
     schema: &Schema,
     transaction: Option<&Changes>,
     store: &mut Store,
+    cache: &mut HotCache,
 ) -> Result<QueryFile> {
     let path = store.temp("response");
     let result = QueryFile {
@@ -547,6 +617,10 @@ pub(crate) fn execute(
     let mut writer = RowWriter::new(&result.path)?;
     let limit = plan.limit.unwrap_or(usize::MAX);
     if limit == 0 {
+        writer.finish()?;
+        return Ok(result);
+    }
+    if transaction.is_none() && try_hot(&plan, schema, store, cache, &mut writer)? {
         writer.finish()?;
         return Ok(result);
     }

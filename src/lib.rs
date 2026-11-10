@@ -2,6 +2,7 @@
 mod disk_index;
 mod distance;
 mod engine;
+mod hot;
 mod protocol;
 mod query;
 mod read_batch;

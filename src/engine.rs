@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use crate::hot::HotCache;
 use crate::query::{self, Plan, Predicates, QueryFile};
 use crate::sql::{self, Statement};
 use crate::storage::{Catalog, Changes, LocatedRow, Op, Store};
@@ -15,12 +16,14 @@ pub(crate) enum Outcome {
 pub(crate) struct Engine {
     store: Store,
     transaction: Option<Changes>,
+    hot: HotCache,
 }
 impl Engine {
     pub fn open(path: &Path) -> Result<Self> {
         Ok(Self {
             store: Store::open(path)?,
             transaction: None,
+            hot: HotCache::new(),
         })
     }
     fn catalog(&self) -> &Catalog {
@@ -45,6 +48,12 @@ impl Engine {
     pub fn rollback(&mut self) {
         self.transaction = None;
     }
+    fn commit(&mut self, changes: &Changes) -> Result<()> {
+        self.store.commit(changes)?;
+        // A successful replay can replace a WAL position or the table layout.
+        self.hot.invalidate();
+        Ok(())
+    }
     pub fn execute(&mut self, input: &str) -> Result<Outcome> {
         let statement = sql::parse(input)?;
         match statement {
@@ -60,7 +69,7 @@ impl Engine {
             }
             Statement::Commit => {
                 if let Some(tx) = self.transaction.take() {
-                    self.store.commit(&tx)?;
+                    self.commit(&tx)?;
                 }
                 return Ok(Outcome::Ok);
             }
@@ -71,8 +80,14 @@ impl Engine {
             Statement::Select(select) => {
                 let schema = self.schema(&select.table)?;
                 let plan = Plan::bind(&schema, &select)?;
-                return query::execute(plan, &schema, self.transaction.as_ref(), &mut self.store)
-                    .map(Outcome::Query);
+                return query::execute(
+                    plan,
+                    &schema,
+                    self.transaction.as_ref(),
+                    &mut self.store,
+                    &mut self.hot,
+                )
+                .map(Outcome::Query);
             }
             _ => {}
         }
@@ -229,7 +244,7 @@ impl Engine {
         if let Some(tx) = &mut self.transaction {
             tx.merge(&changes)?;
         } else {
-            self.store.commit(&changes)?;
+            self.commit(&changes)?;
         }
         Ok(outcome)
     }

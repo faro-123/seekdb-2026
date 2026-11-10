@@ -141,7 +141,7 @@ fn read_body(r: &mut impl Read, data: &mut Vec<u8>) -> Result<bool> {
     Ok(true)
 }
 
-enum Field<'a> {
+pub(crate) enum Field<'a> {
     Int(&'a [u8; 8]),
     Text(&'a [u8]),
     Vector(&'a [[u8; 4]]),
@@ -641,6 +641,31 @@ pub(crate) struct LocatedRow {
     pub position: Position,
 }
 
+pub(crate) enum HotRead<'a> {
+    End,
+    TooLarge,
+    Row {
+        key: i64,
+        offset: u64,
+        fields: RowFields<'a>,
+    },
+}
+
+pub(crate) struct RowFields<'a> {
+    bytes: &'a [u8],
+    count: u32,
+}
+
+impl<'a> RowFields<'a> {
+    pub fn count(&self) -> usize {
+        self.count as usize
+    }
+
+    pub fn next_field(&mut self) -> Result<Field<'a>> {
+        read_field(&mut self.bytes)
+    }
+}
+
 impl Iterator for View {
     type Item = Result<LocatedRow>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -677,6 +702,35 @@ impl View {
             Some(Op::Put { row, .. }) => Ok(row),
             _ => Err(corrupt("index points to non-row")),
         }
+    }
+
+    // Called only on a committed view. The caller owns a fixed-size body buffer.
+    pub fn next_hot<'a>(&mut self, buffer: &'a mut [u8]) -> Result<HotRead<'a>> {
+        let Some((key, position)) = self.next_position()? else {
+            return Ok(HotRead::End);
+        };
+        let Position::Committed(offset) = position else {
+            return Err(corrupt("hot scan requires committed positions"));
+        };
+        let reader = self.seek_row(position)?;
+        let mut len = [0; 4];
+        reader.read_exact(&mut len)?;
+        let Some(body) = buffer.get_mut(..u32::from_le_bytes(len) as usize) else {
+            return Ok(HotRead::TooLarge);
+        };
+        reader.read_exact(body)?;
+        let mut bytes = body
+            .strip_prefix(&[1])
+            .ok_or_else(|| corrupt("index points to non-row"))?;
+        let (_, row_key, count) = put_header(&mut bytes)?;
+        if row_key != key {
+            return Err(corrupt("index points to wrong row"));
+        }
+        Ok(HotRead::Row {
+            key,
+            offset,
+            fields: RowFields { bytes, count },
+        })
     }
 
     fn next_row(&mut self) -> Result<Option<LocatedRow>> {
