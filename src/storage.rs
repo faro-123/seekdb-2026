@@ -1,7 +1,7 @@
 //! Authoritative checksummed commit log and disk-backed statement/transaction views.
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -60,20 +60,22 @@ fn i64read(r: &mut impl Read) -> Result<i64> {
     r.read_exact(&mut b)?;
     Ok(i64::from_le_bytes(b))
 }
-fn textread(r: &mut Cursor<Vec<u8>>) -> Result<String> {
-    let n = usize::try_from(u32read(r)?).map_err(|_| corrupt("invalid length"))?;
-    let pos = usize::try_from(r.position()).map_err(|_| corrupt("invalid position"))?;
-    let bytes = r
-        .get_ref()
-        .get(
-            pos..pos
-                .checked_add(n)
-                .ok_or_else(|| corrupt("invalid length"))?,
-        )
-        .ok_or_else(|| corrupt("truncated string"))?;
-    let s = String::from_utf8(bytes.to_vec()).map_err(|_| corrupt("invalid UTF-8"))?;
-    r.set_position(u64::try_from(pos + n).unwrap());
-    Ok(s)
+fn take<'a>(r: &mut &'a [u8], bytes: usize) -> Result<&'a [u8]> {
+    let (field, rest) = r
+        .split_at_checked(bytes)
+        .ok_or_else(|| corrupt("truncated field"))?;
+    *r = rest;
+    Ok(field)
+}
+fn sized_bytes<'a>(r: &mut &'a [u8], item_bytes: usize) -> Result<&'a [u8]> {
+    let count = usize::try_from(u32read(r)?).map_err(|_| corrupt("invalid field length"))?;
+    let bytes = count
+        .checked_mul(item_bytes)
+        .ok_or_else(|| corrupt("field size overflow"))?;
+    take(r, bytes)
+}
+fn decode_text(bytes: &[u8]) -> Result<String> {
+    String::from_utf8(bytes.to_vec()).map_err(|_| corrupt("invalid UTF-8"))
 }
 fn encode(op: &Op) -> Result<Vec<u8>> {
     let mut b = Vec::new();
@@ -123,68 +125,134 @@ struct Record {
     vector_at: Option<u64>,
 }
 
-fn read_record(r: &mut impl Read) -> Result<Option<Record>> {
+fn read_body(r: &mut impl Read, data: &mut Vec<u8>) -> Result<bool> {
     let mut length = [0; 4];
     let read = r.read(&mut length[..1])?;
     if read == 0 {
-        return Ok(None);
+        return Ok(false);
     }
     r.read_exact(&mut length[1..])?;
     let len = usize::try_from(u32::from_le_bytes(length))
         .map_err(|_| corrupt("invalid record length"))?;
     // One row may exceed a sort run, but no decoder allocates the entire log.
-    let mut data = vec![0; len];
-    r.read_exact(&mut data)?;
-    let mut r = Cursor::new(data);
-    let mut vector_at = None;
-    let mut tag = [0];
-    r.read_exact(&mut tag)?;
-    let op = match tag[0] {
-        0 => {
-            let s: Schema = serde_json::from_slice(&r.get_ref()[1..])
-                .map_err(|_| corrupt("invalid schema record"))?;
-            r.set_position(u64::try_from(len).unwrap());
-            Op::Schema(s)
+    data.resize(len, 0);
+    r.read_exact(data)?;
+    Ok(true)
+}
+
+enum Field<'a> {
+    Int(&'a [u8; 8]),
+    Text(&'a [u8]),
+    Vector(&'a [[u8; 4]]),
+}
+impl Field<'_> {
+    fn equals(&self, value: &Value) -> bool {
+        match (self, value) {
+            (Self::Int(bytes), Value::Int(n)) => i64::from_le_bytes(**bytes) == *n,
+            (Self::Text(bytes), Value::Text(s)) => *bytes == s.as_bytes(),
+            _ => false,
         }
-        1 => {
-            let table = textread(&mut r)?;
-            let key = i64read(&mut r)?;
-            let count = u32read(&mut r)?;
-            let mut row = Vec::new();
-            for _ in 0..count {
-                r.read_exact(&mut tag)?;
-                row.push(match tag[0] {
-                    0 => Value::Int(i64read(&mut r)?),
-                    1 => Value::Text(textread(&mut r)?),
-                    2 => {
-                        let n = u32read(&mut r)?;
-                        // Include the length prefix outside the record body.
-                        vector_at = Some(4 + r.position());
-                        let mut v = Vec::new();
-                        for _ in 0..n {
-                            v.push(f32::from_bits(u32read(&mut r)?));
-                        }
-                        Value::Vector(v)
-                    }
-                    _ => return Err(corrupt("invalid value tag")),
-                });
-            }
-            Op::Put { table, key, row }
-        }
-        2 => Op::Delete {
-            table: textread(&mut r)?,
-            key: i64read(&mut r)?,
-        },
-        _ => return Err(corrupt("invalid operation tag")),
+    }
+}
+
+fn read_field<'a>(r: &mut &'a [u8]) -> Result<Field<'a>> {
+    let [tag] = *take(r, 1)? else {
+        unreachable!("read exactly one tag byte");
     };
-    if r.position() != u64::try_from(len).unwrap() {
+    match tag {
+        0 => Ok(Field::Int(take(r, 8)?.first_chunk().unwrap())),
+        1 => Ok(Field::Text(sized_bytes(r, 1)?)),
+        2 => Ok(Field::Vector(sized_bytes(r, 4)?.as_chunks::<4>().0)),
+        _ => Err(corrupt("invalid value tag")),
+    }
+}
+fn put_header<'a>(r: &mut &'a [u8]) -> Result<(&'a [u8], i64, u32)> {
+    Ok((sized_bytes(r, 1)?, i64read(r)?, u32read(r)?))
+}
+fn decode_vector(bytes: &[[u8; 4]]) -> Vec<f32> {
+    bytes.iter().map(|&b| f32::from_le_bytes(b)).collect()
+}
+fn decode_values(mut r: &[u8], count: u32) -> Result<(Vec<Value>, Option<usize>)> {
+    let bytes = r.len();
+    let mut row = Vec::new();
+    let mut vector_at = None;
+    for _ in 0..count {
+        row.push(match read_field(&mut r)? {
+            Field::Int(b) => Value::Int(i64::from_le_bytes(*b)),
+            Field::Text(b) => Value::Text(decode_text(b)?),
+            Field::Vector(b) => {
+                vector_at = Some(bytes - r.len() - std::mem::size_of_val(b));
+                Value::Vector(decode_vector(b))
+            }
+        });
+    }
+    if !r.is_empty() {
         return Err(corrupt("record has trailing bytes"));
     }
-    Ok(Some(Record { op, vector_at }))
+    Ok((row, vector_at))
+}
+
+fn decode_record(data: &[u8]) -> Result<Record> {
+    let (&tag, mut r) = data.split_first().ok_or_else(|| corrupt("empty record"))?;
+    let mut vector_at = None;
+    let op = match tag {
+        0 => Op::Schema(serde_json::from_slice(r).map_err(|_| corrupt("invalid schema record"))?),
+        1 => {
+            let (table, key, count) = put_header(&mut r)?;
+            let table = decode_text(table)?;
+            let (row, offset) = decode_values(r, count)?;
+            // Include the length prefix outside the record body.
+            vector_at = offset.map(|i| 4 + (data.len() - r.len() + i) as u64);
+            Op::Put { table, key, row }
+        }
+        2 => {
+            let table = decode_text(sized_bytes(&mut r, 1)?)?;
+            let key = i64read(&mut r)?;
+            if !r.is_empty() {
+                return Err(corrupt("record has trailing bytes"));
+            }
+            Op::Delete { table, key }
+        }
+        _ => return Err(corrupt("invalid operation tag")),
+    };
+    Ok(Record { op, vector_at })
+}
+
+fn read_record(r: &mut impl Read) -> Result<Option<Record>> {
+    let mut data = Vec::new();
+    if !read_body(r, &mut data)? {
+        return Ok(None);
+    }
+    decode_record(&data).map(Some)
 }
 
 fn read_op(r: &mut impl Read) -> Result<Option<Op>> {
     Ok(read_record(r)?.map(|record| record.op))
+}
+
+fn decode_matching_row(data: &[u8], equalities: &[(usize, &Value)]) -> Result<Option<Vec<Value>>> {
+    let mut fields = data
+        .strip_prefix(&[1])
+        .ok_or_else(|| corrupt("index points to non-row"))?;
+    let (_, _, count) = put_header(&mut fields)?;
+    let mut rest = fields;
+    let mut tests = equalities.iter().peekable();
+    // Tests are in column order. Skipping a field inspects only its tag and length.
+    for column in 0..count as usize {
+        let field = read_field(&mut rest)?;
+        while let Some(&&(index, value)) = tests.peek()
+            && index == column
+        {
+            if !field.equals(value) {
+                return Ok(None);
+            }
+            tests.next();
+        }
+        if tests.peek().is_none() {
+            return decode_values(fields, count).map(|(values, _)| Some(values));
+        }
+    }
+    Err(corrupt("filter column is outside row"))
 }
 
 pub(crate) struct Changes {
@@ -516,14 +584,7 @@ impl VectorView {
         self.log.seek(SeekFrom::Start(offset))?;
         self.buffer.resize(self.bytes, 0);
         self.log.read_exact(&mut self.buffer)?;
-        let vector = self
-            .buffer
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|&bytes| f32::from_le_bytes(bytes))
-            .collect();
-        Ok(vector)
+        Ok(decode_vector(self.buffer.as_chunks::<4>().0))
     }
 }
 
@@ -567,13 +628,6 @@ pub(crate) struct LocatedRow {
     pub position: Position,
 }
 
-fn read_row(file: &mut File, offset: u64) -> Result<Vec<Value>> {
-    file.seek(SeekFrom::Start(offset))?;
-    match read_op(file)? {
-        Some(Op::Put { row, .. }) => Ok(row),
-        _ => Err(corrupt("index points to non-row")),
-    }
-}
 impl Iterator for View {
     type Item = Result<LocatedRow>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -581,15 +635,59 @@ impl Iterator for View {
     }
 }
 impl View {
+    fn seek_row(&mut self, position: Position) -> Result<&mut File> {
+        let (file, offset) = match position {
+            Position::Committed(offset) => (&mut self.wal, offset),
+            Position::Staged(offset) => (
+                self.staged
+                    .as_mut()
+                    .ok_or_else(|| corrupt("staged file missing"))?,
+                offset,
+            ),
+            Position::Vector(_) => return Err(corrupt("vector location requested from row view")),
+        };
+        file.seek(SeekFrom::Start(offset))?;
+        Ok(file)
+    }
     pub fn read_at(&mut self, position: Position) -> Result<Vec<Value>> {
-        match position {
-            Position::Committed(offset) => read_row(&mut self.wal, offset),
-            Position::Staged(offset) => read_row(self.staged.as_mut().unwrap(), offset),
-            Position::Vector(_) => Err(corrupt("vector location requested from row view")),
+        match read_op(self.seek_row(position)?)? {
+            Some(Op::Put { row, .. }) => Ok(row),
+            _ => Err(corrupt("index points to non-row")),
         }
     }
 
     fn next_row(&mut self) -> Result<Option<LocatedRow>> {
+        let Some((key, position)) = self.next_position()? else {
+            return Ok(None);
+        };
+        Ok(Some(LocatedRow {
+            key,
+            position,
+            values: self.read_at(position)?,
+        }))
+    }
+
+    pub fn next_equal(
+        &mut self,
+        equalities: &[(usize, &Value)],
+        buffer: &mut Vec<u8>,
+    ) -> Result<Option<LocatedRow>> {
+        while let Some((key, position)) = self.next_position()? {
+            if !read_body(self.seek_row(position)?, buffer)? {
+                return Err(corrupt("index points to missing row"));
+            }
+            if let Some(values) = decode_matching_row(buffer, equalities)? {
+                return Ok(Some(LocatedRow {
+                    key,
+                    position,
+                    values,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn next_position(&mut self) -> Result<Option<(i64, Position)>> {
         if let Some(base) = &mut self.base {
             for entry in base.by_ref() {
                 let mut e = entry?;
@@ -608,11 +706,7 @@ impl View {
                 } else {
                     Position::Committed(e.offset)
                 };
-                return Ok(Some(LocatedRow {
-                    key: e.key,
-                    values: self.read_at(position)?,
-                    position,
-                }));
+                return Ok(Some((e.key, position)));
             }
             self.base = None;
         }
@@ -632,14 +726,37 @@ impl View {
                 if old.is_some() {
                     continue;
                 }
-                let position = Position::Staged(e.offset);
-                return Ok(Some(LocatedRow {
-                    key: e.key,
-                    values: self.read_at(position)?,
-                    position,
-                }));
+                return Ok(Some((e.key, Position::Staged(e.offset))));
             }
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejected_equality_row_does_not_decode_its_vector() {
+        let mut record = encode(&Op::Put {
+            table: "docs".into(),
+            key: 7,
+            row: vec![
+                Value::Int(7),
+                Value::Text("keep".into()),
+                Value::Vector(vec![1.0]),
+            ],
+        })
+        .unwrap();
+        record.pop(); // A vector decode would encounter a truncated component.
+        let body = &record[4..];
+
+        assert!(
+            decode_matching_row(body, &[(1, &Value::Text("other".into()))])
+                .unwrap()
+                .is_none()
+        );
+        assert!(decode_matching_row(body, &[(1, &Value::Text("keep".into()))]).is_err());
     }
 }

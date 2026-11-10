@@ -257,3 +257,28 @@ fn filtered_exact_ties_and_vector_projection_are_current() {
     assert_eq!(r[2]["rows"], json!([[3, 5.0], [8, 5.0]]));
     assert_eq!(r[5]["rows"], json!([[8]]));
 }
+
+#[test]
+fn equality_after_vector_observes_staged_rows_and_full_projection() {
+    let r = run(&[
+        "CREATE TABLE t (v VECTOR(2), label VARCHAR(4), n BIGINT, id BIGINT PRIMARY KEY);",
+        "INSERT INTO t VALUES ('[0,0]','别',9007199254740993,1),('[3,4]','猫😀',9007199254740993,3),('[-3,-4]','猫😀',9007199254740993,2),('[0,0]','猫😀',9007199254740992,4);",
+        "CREATE VECTOR INDEX vi ON t(v);",
+        "SELECT label,id,v FROM t WHERE n=9007199254740993 AND label='猫😀' AND n=9007199254740993 ORDER BY L2_DISTANCE(v,'[0,0]') LIMIT 2;",
+        "BEGIN;",
+        "UPDATE t SET label='猫😀' WHERE id=1;",
+        "DELETE FROM t WHERE id=2;",
+        "INSERT INTO t VALUES ('[0,1]','猫😀',9007199254740993,5);",
+        "SELECT id FROM t WHERE label='猫😀' AND n=9007199254740993 ORDER BY L2_DISTANCE(v,'[0,0]') LIMIT 2;",
+        "SELECT id FROM t WHERE label='猫😀' AND label='别' ORDER BY L2_DISTANCE(v,'[0,0]') LIMIT 2;",
+        "ROLLBACK;",
+        "SELECT id FROM t WHERE label='猫😀' AND n>=9007199254740993 ORDER BY L2_DISTANCE(v,'[0,0]') LIMIT 2;",
+    ]);
+    assert_eq!(
+        r[3]["rows"],
+        json!([["猫😀", 2, [-3.0, -4.0]], ["猫😀", 3, [3.0, 4.0]]])
+    );
+    assert_eq!(r[8]["rows"], json!([[1], [5]]));
+    assert_eq!(r[9]["rows"], json!([]));
+    assert_eq!(r[11]["rows"], json!([[2], [3]]));
+}

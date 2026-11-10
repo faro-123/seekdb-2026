@@ -32,11 +32,8 @@ impl Predicates {
         Ok(Self(result))
     }
     pub fn matches(&self, row: &[Value]) -> bool {
-        self.matches_values(|i| &row[i])
-    }
-    fn matches_values<'a>(&self, column: impl Fn(usize) -> &'a Value) -> bool {
         self.0.iter().all(|(i, op, wanted)| {
-            let cmp = match (column(*i), wanted) {
+            let cmp = match (&row[*i], wanted) {
                 (Value::Int(a), Value::Int(b)) => a.cmp(b),
                 (Value::Text(a), Value::Text(b)) => a.cmp(b),
                 _ => return false,
@@ -50,6 +47,15 @@ impl Predicates {
                 _ => false,
             }
         })
+    }
+
+    fn equalities(&self) -> Option<Vec<(usize, &Value)>> {
+        if self.0.is_empty() || self.0.iter().any(|(_, op, _)| op != "=") {
+            return None;
+        }
+        let mut equalities: Vec<_> = self.0.iter().map(|(i, _, value)| (*i, value)).collect();
+        equalities.sort_unstable_by_key(|&(i, _)| i);
+        Some(equalities)
     }
 }
 
@@ -72,8 +78,19 @@ impl QueryRow {
     }
 }
 
-enum Scan {
-    Table(View),
+enum TableFilter<'a> {
+    Full(&'a Predicates),
+    Equality {
+        tests: Vec<(usize, &'a Value)>,
+        buffer: Vec<u8>,
+    },
+}
+
+enum Scan<'a> {
+    Table {
+        source: View,
+        filter: TableFilter<'a>,
+    },
     Vector {
         source: VectorView,
         primary: usize,
@@ -88,10 +105,10 @@ fn indexed_row(key: i64, vector: Vec<f32>, primary: usize, embedding: usize) -> 
     }
 }
 
-impl Scan {
+impl Scan<'_> {
     fn read_at(&mut self, candidate: &Candidate) -> Result<QueryRow> {
         match (self, candidate.position) {
-            (Self::Table(view), position) => Ok(QueryRow::Full(view.read_at(position)?)),
+            (Self::Table { source, .. }, position) => Ok(QueryRow::Full(source.read_at(position)?)),
             (
                 Self::Vector {
                     source,
@@ -110,14 +127,24 @@ impl Scan {
     }
 }
 
-impl Iterator for Scan {
+impl Iterator for Scan<'_> {
     type Item = Result<(i64, Position, QueryRow)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::Table(view) => view.next().map(|record| {
-                record.map(|row| (row.key, row.position, QueryRow::Full(row.values)))
-            }),
+            Self::Table { source, filter } => {
+                let record = match filter {
+                    TableFilter::Full(predicates) => source.find(|record| {
+                        record
+                            .as_ref()
+                            .map_or(true, |row| predicates.matches(&row.values))
+                    }),
+                    TableFilter::Equality { tests, buffer } => {
+                        source.next_equal(tests, buffer).transpose()
+                    }
+                }?;
+                Some(record.map(|row| (row.key, row.position, QueryRow::Full(row.values))))
+            }
             Self::Vector {
                 source,
                 primary,
@@ -256,6 +283,22 @@ impl Plan {
             && expressions()
                 .all(|e| matches!(e.column_index(), i if i == schema.primary || i == vector));
         covered.then_some(vector)
+    }
+
+    fn table_filter(&self) -> TableFilter<'_> {
+        if self.limit.is_some()
+            && self
+                .order
+                .iter()
+                .any(|(expr, _)| matches!(expr, BoundExpr::Distance(..)))
+            && let Some(tests) = self.predicates.equalities()
+        {
+            return TableFilter::Equality {
+                tests,
+                buffer: Vec::new(),
+            };
+        }
+        TableFilter::Full(&self.predicates)
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -517,16 +560,17 @@ pub(crate) fn execute(
             embedding,
         }
     } else {
-        Scan::Table(store.view(&schema.name, transaction)?)
+        Scan::Table {
+            source: store.view(&schema.name, transaction)?,
+            filter: plan.table_filter(),
+        }
     };
     if plan.order.is_empty() {
         for record in view {
             let (_, _, row) = record?;
-            if plan.predicates.matches_values(|i| row.column(i)) {
-                writer.row(&plan.projections, &row)?;
-                if writer.count >= limit {
-                    break;
-                }
+            writer.row(&plan.projections, &row)?;
+            if writer.count >= limit {
+                break;
             }
         }
         writer.finish()?;
@@ -544,9 +588,6 @@ pub(crate) fn execute(
     let mut heap_mode = plan.limit.is_some_and(|n| n <= 10000);
     for record in view.by_ref() {
         let (primary, position, row) = record?;
-        if !plan.predicates.matches_values(|i| row.column(i)) {
-            continue;
-        }
         let c = Candidate {
             keys: plan
                 .order
