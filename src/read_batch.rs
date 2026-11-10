@@ -68,8 +68,26 @@ impl<I: Iterator<Item = Result<Entry>>> Iterator for OffsetBatch<I> {
     }
 }
 
+struct ReadLimit<R> {
+    source: R,
+    limit: usize,
+}
+
+impl<R: Read> Read for ReadLimit<R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let count = out.len().min(self.limit);
+        self.source.read(&mut out[..count])
+    }
+}
+
+impl<R: Seek> Seek for ReadLimit<R> {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        self.source.seek(from)
+    }
+}
+
 pub(crate) struct BufferedFile<R> {
-    source: BufReader<R>,
+    source: BufReader<ReadLimit<R>>,
     position: u64,
     prefetch: bool,
 }
@@ -77,7 +95,13 @@ pub(crate) struct BufferedFile<R> {
 impl<R: Read + Seek> BufferedFile<R> {
     fn new(source: R) -> Self {
         Self {
-            source: BufReader::with_capacity(READ_BYTES, source),
+            source: BufReader::with_capacity(
+                READ_BYTES,
+                ReadLimit {
+                    source,
+                    limit: usize::MAX,
+                },
+            ),
             position: 0,
             prefetch: true,
         }
@@ -86,12 +110,8 @@ impl<R: Read + Seek> BufferedFile<R> {
 
 impl<R: Read> Read for BufferedFile<R> {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        let count = if !self.prefetch && self.source.buffer().is_empty() {
-            // Sparse positions keep exact-sized reads instead of reading a whole window.
-            self.source.get_mut().read(out)?
-        } else {
-            self.source.read(out)?
-        };
+        self.source.get_mut().limit = if self.prefetch { usize::MAX } else { out.len() };
+        let count = self.source.read(out)?;
         self.position += count as u64;
         Ok(count)
     }
@@ -249,5 +269,22 @@ mod tests {
         reader.seek(SeekFrom::Start(1000)).unwrap();
         reader.read_exact(&mut value).unwrap();
         assert_eq!(bytes.get(), filled);
+    }
+
+    #[test]
+    fn backward_seek_after_sparse_read_uses_the_logical_position() {
+        let bytes: Vec<_> = (0..24000).map(|n| (n % 251) as u8).collect();
+        let mut reader = BufferedFile::new(Cursor::new(&bytes));
+        let mut first = [0; 4];
+        reader.read_exact(&mut first).unwrap();
+        reader.seek(SeekFrom::Start(8192)).unwrap();
+        reader.prefetch = false;
+        let mut sparse = [0; 16];
+        reader.read_exact(&mut sparse).unwrap();
+        assert_eq!(sparse, bytes[8192..8208]);
+        reader.seek(SeekFrom::Start(8190)).unwrap();
+        let mut actual = [0; 8];
+        reader.read_exact(&mut actual).unwrap();
+        assert_eq!(actual, bytes[8190..8198]);
     }
 }
