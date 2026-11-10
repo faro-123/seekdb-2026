@@ -314,3 +314,124 @@ fn equality_after_vector_observes_staged_rows_and_full_projection() {
     assert_eq!(r[9]["rows"], json!([]));
     assert_eq!(r[11]["rows"], json!([[2], [3]]));
 }
+
+#[test]
+fn batched_topk_uses_current_committed_versions_and_transaction_fallback() {
+    let data = Data::new();
+    let values = (1..=4200)
+        .map(|n| {
+            format!(
+                "({n},'{}','[{},0,0,0]')",
+                if n % 2 == 0 { "yes" } else { "no" },
+                n % 13
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let topk = "SELECT id FROM t WHERE c='yes' ORDER BY L2_DISTANCE(v,'[0,0,0,0]') LIMIT 10;";
+    let replies = session(
+        &data,
+        &[
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, c VARCHAR(3), v VECTOR(4));".into(),
+            format!("INSERT INTO t VALUES {values};"),
+            "CREATE VECTOR INDEX vi ON t(v);".into(),
+            topk.into(),
+            "UPDATE t SET v='[0,0,0,0]' WHERE id=2;".into(),
+            "DELETE FROM t WHERE id=26;".into(),
+            "INSERT INTO t VALUES (26,'yes','[-1,0,0,0]');".into(),
+            topk.into(),
+            "BEGIN;".into(),
+            "UPDATE t SET v='[0,0,0,0]' WHERE id=4;".into(),
+            "DELETE FROM t WHERE id=2;".into(),
+            topk.into(),
+            "ROLLBACK;".into(),
+            topk.into(),
+            "BEGIN;".into(),
+            "UPDATE t SET v='[0,0,0,0]' WHERE id=26;".into(),
+            "COMMIT;".into(),
+            topk.into(),
+        ],
+    );
+    assert_eq!(
+        replies[3]["rows"],
+        json!([
+            [26],
+            [52],
+            [78],
+            [104],
+            [130],
+            [156],
+            [182],
+            [208],
+            [234],
+            [260]
+        ])
+    );
+    assert_eq!(
+        replies[7]["rows"],
+        json!([
+            [2],
+            [52],
+            [78],
+            [104],
+            [130],
+            [156],
+            [182],
+            [208],
+            [234],
+            [260]
+        ])
+    );
+    assert_eq!(
+        replies[11]["rows"],
+        json!([
+            [4],
+            [52],
+            [78],
+            [104],
+            [130],
+            [156],
+            [182],
+            [208],
+            [234],
+            [260]
+        ])
+    );
+    assert_eq!(replies[13]["rows"], replies[7]["rows"]);
+    assert_eq!(
+        replies[17]["rows"],
+        json!([
+            [2],
+            [26],
+            [52],
+            [78],
+            [104],
+            [130],
+            [156],
+            [182],
+            [208],
+            [234]
+        ])
+    );
+    let recovered = session(&data, &[topk.into()]);
+    assert_eq!(recovered[0]["rows"], replies[17]["rows"]);
+}
+
+#[test]
+fn batched_topk_reads_vectors_and_rows_larger_than_its_window_and_batch_budget() {
+    let v0 = std::iter::repeat_n("0", 2053).collect::<Vec<_>>().join(",");
+    let v1 = format!(
+        "1,{}",
+        std::iter::repeat_n("0", 2052).collect::<Vec<_>>().join(",")
+    );
+    let content = "x".repeat(196608);
+    let replies=session(&Data::new(),&[
+        "CREATE TABLE t (content VARCHAR(262144), v VECTOR(2053), c VARCHAR(1), id BIGINT PRIMARY KEY);".into(),
+        format!("INSERT INTO t VALUES ('{content}','[{v1}]','x',1),('{content}','[{v0}]','y',2);"),
+        "CREATE VECTOR INDEX vi ON t(v);".into(),
+        format!("SELECT id,L2_DISTANCE(v,'[{v0}]') AS d FROM t ORDER BY d LIMIT 2;"),
+        format!("SELECT id FROM t WHERE c='y' ORDER BY L2_DISTANCE(v,'[{v0}]') LIMIT 2;"),
+    ]);
+    assert_eq!(replies[3]["rows"], json!([[2, 0.0], [1, 1.0]]));
+    assert_eq!(replies[4]["rows"], json!([[2]]));
+}

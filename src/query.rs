@@ -88,7 +88,7 @@ enum TableFilter<'a> {
 
 enum Scan<'a> {
     Table {
-        source: View,
+        source: Box<View>,
         filter: TableFilter<'a>,
     },
     Vector {
@@ -550,18 +550,34 @@ pub(crate) fn execute(
         writer.finish()?;
         return Ok(result);
     }
+    let batch_reads = transaction.is_none()
+        && plan.limit.is_some()
+        && plan
+            .order
+            .iter()
+            .any(|(expr, _)| matches!(expr, BoundExpr::Distance(..)));
     let mut view = if let Some(embedding) = plan
         .covered_vector(schema)
         .filter(|_| transaction.is_none())
     {
+        let source = store.vector_view(schema, embedding)?;
         Scan::Vector {
-            source: store.vector_view(schema, embedding)?,
+            source: if batch_reads {
+                source.batched()
+            } else {
+                source
+            },
             primary: schema.primary,
             embedding,
         }
     } else {
+        let source = store.view(&schema.name, transaction)?;
         Scan::Table {
-            source: store.view(&schema.name, transaction)?,
+            source: Box::new(if batch_reads {
+                source.batched()
+            } else {
+                source
+            }),
             filter: plan.table_filter(),
         }
     };

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::disk_index::{DiskIndex, Entries, Entry};
+use crate::read_batch::{OffsetBatch, WalRead};
 use crate::types::{DataType, Schema, Value};
 use crate::{Error, Result};
 
@@ -544,12 +545,17 @@ impl Store {
         let committed = self.indexes.get(table);
         let overlay = transaction.and_then(|tx| tx.indexes.get(table));
         Ok(View {
-            base: committed.map(DiskIndex::entries).transpose()?,
+            base: committed
+                .map(DiskIndex::entries)
+                .transpose()?
+                .map(OffsetBatch::new),
             base_lookup: committed.map(DiskIndex::reader).transpose()?,
             overlay: overlay.map(DiskIndex::reader).transpose()?,
             extra: overlay.map(DiskIndex::entries).transpose()?,
-            wal: File::open(&self.path)?,
-            staged: transaction.map(|tx| File::open(&tx.path)).transpose()?,
+            wal: WalRead::Direct(File::open(&self.path)?),
+            staged: transaction
+                .map(|tx| File::open(&tx.path).map(WalRead::Direct))
+                .transpose()?,
         })
     }
     pub fn vector_view(&self, schema: &Schema, column: usize) -> Result<VectorView> {
@@ -564,8 +570,8 @@ impl Store {
             .checked_mul(4)
             .ok_or_else(|| corrupt("vector size overflow"))?;
         Ok(VectorView {
-            slots: index.entries()?,
-            log: File::open(&self.path)?,
+            slots: OffsetBatch::new(index.entries()?),
+            log: WalRead::Direct(File::open(&self.path)?),
             bytes,
             buffer: Vec::new(),
         })
@@ -573,13 +579,19 @@ impl Store {
 }
 
 pub(crate) struct VectorView {
-    slots: Entries,
-    log: File,
+    slots: OffsetBatch<Entries>,
+    log: WalRead,
     bytes: usize,
     buffer: Vec<u8>,
 }
 
 impl VectorView {
+    pub fn batched(mut self) -> Self {
+        self.slots = self.slots.ordered();
+        self.log = self.log.buffered();
+        self
+    }
+
     pub fn read_at(&mut self, offset: u64) -> Result<Vec<f32>> {
         self.log.seek(SeekFrom::Start(offset))?;
         self.buffer.resize(self.bytes, 0);
@@ -599,6 +611,7 @@ impl Iterator for VectorView {
                 Err(error) => return Some(Err(error)),
             }
         };
+        self.log.prefetch(self.slots.nearby(entry.offset));
         Some(
             self.read_at(entry.offset)
                 .map(|values| (entry.key, entry.offset, values)),
@@ -607,12 +620,12 @@ impl Iterator for VectorView {
 }
 
 pub(crate) struct View {
-    base: Option<Entries>,
+    base: Option<OffsetBatch<Entries>>,
     base_lookup: Option<DiskIndex>,
     overlay: Option<DiskIndex>,
     extra: Option<Entries>,
-    wal: File,
-    staged: Option<File>,
+    wal: WalRead,
+    staged: Option<WalRead>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -635,7 +648,17 @@ impl Iterator for View {
     }
 }
 impl View {
-    fn seek_row(&mut self, position: Position) -> Result<&mut File> {
+    pub fn batched(mut self) -> Self {
+        debug_assert!(
+            self.staged.is_none(),
+            "batching requires committed positions"
+        );
+        self.base = self.base.map(OffsetBatch::ordered);
+        self.wal = self.wal.buffered();
+        self
+    }
+
+    fn seek_row(&mut self, position: Position) -> Result<&mut WalRead> {
         let (file, offset) = match position {
             Position::Committed(offset) => (&mut self.wal, offset),
             Position::Staged(offset) => (
@@ -689,7 +712,7 @@ impl View {
 
     fn next_position(&mut self) -> Result<Option<(i64, Position)>> {
         if let Some(base) = &mut self.base {
-            for entry in base.by_ref() {
+            while let Some(entry) = base.next() {
                 let mut e = entry?;
                 let mut staged = false;
                 if let Some(overlay) = &mut self.overlay
@@ -706,6 +729,9 @@ impl View {
                 } else {
                     Position::Committed(e.offset)
                 };
+                if !staged {
+                    self.wal.prefetch(base.nearby(e.offset));
+                }
                 return Ok(Some((e.key, position)));
             }
             self.base = None;

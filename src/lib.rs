@@ -4,6 +4,7 @@ mod distance;
 mod engine;
 mod protocol;
 mod query;
+mod read_batch;
 mod sql;
 mod storage;
 mod types;
