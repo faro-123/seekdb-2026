@@ -27,9 +27,14 @@ impl SquaredL2 {
         for (&a, &b) in row.iter().zip(query) {
             let (x, i, nx) = parts(a);
             let (y, j, ny) = parts(b);
-            if i == j {
+            if i.abs_diff(j) <= 7 {
+                // With 24-bit significands and at most seven alignment bits,
+                // the sum is below 2^32, so its square fits in one u64.
+                let common = i.min(j);
+                let x = x << (i - common);
+                let y = y << (j - common);
                 let diff = if nx == ny { x.abs_diff(y) } else { x + y };
-                sum.apply(diff * diff, 2 * i, false);
+                sum.apply(diff * diff, 2 * common, false);
             } else {
                 // (a-b)^2 = a^2+b^2-2ab. Add both squares before subtracting.
                 sum.apply(x * x, 2 * i, false);

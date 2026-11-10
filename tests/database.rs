@@ -29,6 +29,38 @@ fn exact_topk_resolves_distances_that_round_to_the_same_f64() {
 }
 
 #[test]
+fn exact_topk_preserves_subnormal_differences_and_alignment_boundary() {
+    let responses = run(&[
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, kind VARCHAR(1), v VECTOR(2));",
+        "INSERT INTO t VALUES \
+         (1,'x','[3.4028234663852886e38,1.401298464324817e-45]'), \
+         (2,'x','[-3.4028234663852886e38,0]'), \
+         (3,'x','[3.4028234663852886e38,-0.0]'), \
+         (4,'g','[-4294967040,0]'),(5,'g','[2147483520,0]'),(6,'g','[4294967040,0]');",
+        "CREATE VECTOR INDEX vi ON t(v);",
+        "SELECT id,L2_DISTANCE(v,'[0,0]') AS d FROM t ORDER BY d LIMIT 6;",
+        "SELECT id,L2_DISTANCE(v,'[-16777215,0]') AS d FROM t WHERE kind='g' ORDER BY d LIMIT 3;",
+    ]);
+    let maximum = f64::from(f32::MAX);
+    assert_eq!(
+        responses[3]["rows"],
+        json!([
+            [5, 2147483520.0],
+            [4, 4294967040.0],
+            [6, 4294967040.0],
+            [2, maximum],
+            [3, maximum],
+            [1, maximum]
+        ])
+    );
+    // Opposite signs at gaps 7 and 8, and same-sign subtraction at gap 8.
+    assert_eq!(
+        responses[4]["rows"],
+        json!([[5, 2164260735.0], [4, 4278189825.0], [6, 4311744255.0]])
+    );
+}
+
+#[test]
 fn vector_elements_must_be_json_numbers() {
     let responses = run(&[
         "CREATE TABLE t (id BIGINT PRIMARY KEY, v VECTOR(2));",
