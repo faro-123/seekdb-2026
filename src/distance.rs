@@ -94,6 +94,8 @@ impl PartialOrd for SquaredL2 {
 pub(crate) struct DistanceBounds {
     lower_factor: f64,
     upper_factor: f64,
+    #[cfg(target_arch = "x86_64")]
+    avx: Option<avx::Kernel>,
 }
 
 impl DistanceBounds {
@@ -113,25 +115,18 @@ impl DistanceBounds {
         Some(Self {
             lower_factor: 1.0 - slack,
             upper_factor: 1.0 + slack,
+            #[cfg(target_arch = "x86_64")]
+            avx: avx::Kernel::detect(),
         })
     }
 
     pub fn estimate(&self, row: &[f32], q: &[f32]) -> f64 {
         debug_assert_eq!(row.len(), q.len());
-        let (row_chunks, row_tail) = row.as_chunks::<8>();
-        let (q_chunks, q_tail) = q.as_chunks::<8>();
-        let mut sums = [0.0; 8];
-        for (a, b) in row_chunks.iter().zip(q_chunks) {
-            for lane in 0..8 {
-                let delta = f64::from(a[lane]) - f64::from(b[lane]);
-                sums[lane] += delta * delta;
-            }
+        #[cfg(target_arch = "x86_64")]
+        if let Some(kernel) = &self.avx {
+            return kernel.estimate(row, q);
         }
-        for (&a, &b) in row_tail.iter().zip(q_tail) {
-            let delta = f64::from(a) - f64::from(b);
-            sums[0] += delta * delta;
-        }
-        sums.into_iter().sum()
+        estimate_scalar(row, q)
     }
 
     pub fn lower(&self, estimate: f64) -> f64 {
@@ -140,6 +135,78 @@ impl DistanceBounds {
 
     pub fn upper(&self, estimate: f64) -> f64 {
         (estimate * self.upper_factor).next_up()
+    }
+}
+
+fn estimate_scalar(row: &[f32], q: &[f32]) -> f64 {
+    let (row_chunks, row_tail) = row.as_chunks::<8>();
+    let (q_chunks, q_tail) = q.as_chunks::<8>();
+    let mut sums = [0.0; 8];
+    for (a, b) in row_chunks.iter().zip(q_chunks) {
+        for lane in 0..8 {
+            let delta = f64::from(a[lane]) - f64::from(b[lane]);
+            sums[lane] += delta * delta;
+        }
+    }
+    reduce(sums, row_tail, q_tail)
+}
+
+fn reduce(mut sums: [f64; 8], row_tail: &[f32], q_tail: &[f32]) -> f64 {
+    for (&a, &b) in row_tail.iter().zip(q_tail) {
+        let delta = f64::from(a) - f64::from(b);
+        sums[0] += delta * delta;
+    }
+    sums.into_iter().sum()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
+mod avx {
+    use std::arch::x86_64::{
+        _mm_setr_ps, _mm256_add_pd, _mm256_cvtps_pd, _mm256_mul_pd, _mm256_setzero_pd,
+        _mm256_storeu_pd, _mm256_sub_pd,
+    };
+
+    pub(super) struct Kernel(());
+
+    impl Kernel {
+        pub(super) fn detect() -> Option<Self> {
+            std::is_x86_feature_detected!("avx").then_some(Self(()))
+        }
+
+        pub(super) fn estimate(&self, row: &[f32], q: &[f32]) -> f64 {
+            // SAFETY: the only constructor checks OS support and AVX availability.
+            unsafe { estimate(row, q) }
+        }
+    }
+
+    #[target_feature(enable = "avx")]
+    fn estimate(row: &[f32], q: &[f32]) -> f64 {
+        let (rows, row_tail) = row.as_chunks::<8>();
+        let (queries, q_tail) = q.as_chunks::<8>();
+        let mut low = _mm256_setzero_pd();
+        let mut high = _mm256_setzero_pd();
+        for (&[a0, a1, a2, a3, a4, a5, a6, a7], &[b0, b1, b2, b3, b4, b5, b6, b7]) in
+            rows.iter().zip(queries)
+        {
+            let a_lo = _mm256_cvtps_pd(_mm_setr_ps(a0, a1, a2, a3));
+            let b_lo = _mm256_cvtps_pd(_mm_setr_ps(b0, b1, b2, b3));
+            let a_hi = _mm256_cvtps_pd(_mm_setr_ps(a4, a5, a6, a7));
+            let b_hi = _mm256_cvtps_pd(_mm_setr_ps(b4, b5, b6, b7));
+            let d_lo = _mm256_sub_pd(a_lo, b_lo);
+            let d_hi = _mm256_sub_pd(a_hi, b_hi);
+            low = _mm256_add_pd(low, _mm256_mul_pd(d_lo, d_lo));
+            high = _mm256_add_pd(high, _mm256_mul_pd(d_hi, d_hi));
+        }
+        let mut sums = [0.0; 8];
+        let (first, last) = sums.split_at_mut(4);
+        // SAFETY: each slice owns four writable f64s. The stores are unaligned.
+        unsafe {
+            _mm256_storeu_pd(first.as_mut_ptr(), low);
+            _mm256_storeu_pd(last.as_mut_ptr(), high);
+        }
+        // Same lane grouping, tail and reduction order as the scalar kernel.
+        super::reduce(sums, row_tail, q_tail)
     }
 }
 
@@ -156,5 +223,35 @@ mod screening_tests {
         let squared = 2.0_f64.powi(-298);
         assert!(bounds.lower(estimate) <= squared && squared <= bounds.upper(estimate));
         assert!(bounds.lower(estimate) > 0.0);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx_estimate_matches_scalar_bits_for_full_and_partial_blocks() {
+        let Some(kernel) = avx::Kernel::detect() else {
+            return;
+        };
+        let mut random = 0xe567_32be_u32;
+        let mut sample = || {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            let mut bits = random;
+            if bits & 0x7f80_0000 == 0x7f80_0000 {
+                bits ^= 0x0080_0000;
+            }
+            f32::from_bits(bits)
+        };
+        for dim in 1..=257 {
+            for _ in 0..8 {
+                let a: Vec<_> = (0..dim).map(|_| sample()).collect();
+                let b: Vec<_> = (0..dim).map(|_| sample()).collect();
+                assert_eq!(
+                    kernel.estimate(&a, &b).to_bits(),
+                    estimate_scalar(&a, &b).to_bits(),
+                    "dimension {dim}"
+                );
+            }
+        }
     }
 }

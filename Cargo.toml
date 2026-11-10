@@ -14,4 +14,4 @@ codegen-units = 1
 strip = true
 
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
