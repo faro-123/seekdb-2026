@@ -120,10 +120,14 @@ impl Drop for Data {
     }
 }
 fn session(data: &Data, sql: &[String]) -> Vec<Value> {
+    session_with_hot_budget(data, sql, 8 << 20)
+}
+fn session_with_hot_budget(data: &Data, sql: &[String], budget: usize) -> Vec<Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_minivectordb"))
         .arg("--data-dir")
         .arg(&data.0)
         .env("MINIVECTORDB_SORT_BYTES", "4096")
+        .env("MINIVECTORDB_HOT_BYTES", budget.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -434,4 +438,83 @@ fn batched_topk_reads_vectors_and_rows_larger_than_its_window_and_batch_budget()
     ]);
     assert_eq!(replies[3]["rows"], json!([[2, 0.0], [1, 1.0]]));
     assert_eq!(replies[4]["rows"], json!([[2]]));
+}
+
+#[test]
+fn screened_topk_refines_the_whole_tied_boundary() {
+    let mut rows = vec!["(1,'[3.4028234663852886e38,1.401298464324817e-45]')".to_owned()];
+    for id in 2..34 {
+        rows.push(format!("({id},'[-3.4028234663852886e38,0]')"));
+    }
+    let insert = format!("INSERT INTO t VALUES {};", rows.join(","));
+    let r = run(&[
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, v VECTOR(2));",
+        &insert,
+        "CREATE VECTOR INDEX vi ON t(v);",
+        "SELECT id,L2_DISTANCE(v,'[0,0]') AS d FROM t ORDER BY d LIMIT 2;",
+        "SELECT id FROM t WHERE id >= 4 ORDER BY L2_DISTANCE(v,'[0,0]') LIMIT 2;",
+        "SELECT id FROM t WHERE id < 1 ORDER BY L2_DISTANCE(v,'[0,0]') LIMIT 2;",
+    ]);
+    let d = f64::from(f32::MAX);
+    assert_eq!(r[3]["rows"], json!([[2, d], [3, d]]));
+    assert_eq!(r[4]["rows"], json!([[4], [5]]));
+    assert_eq!(r[5]["rows"], json!([]));
+}
+
+#[test]
+fn hot_snapshot_projects_current_wal_rows_across_tables_and_commits() {
+    let t = "SELECT id,c,body FROM t WHERE c >= '甲' AND n >= 7 ORDER BY L2_DISTANCE(v,'[0,0]') LIMIT 1;";
+    let u = "SELECT id,c,body FROM u WHERE c >= '甲' AND n >= 7 ORDER BY L2_DISTANCE(v,'[0,0]') LIMIT 1;";
+    let sql: Vec<_> = [
+        "CREATE TABLE t (id BIGINT PRIMARY KEY,c VARCHAR(4),body VARCHAR(12),n BIGINT,v VECTOR(2));",
+        "CREATE TABLE u (id BIGINT PRIMARY KEY,c VARCHAR(4),body VARCHAR(12),n BIGINT,v VECTOR(2));",
+        "INSERT INTO t VALUES (1,'甲','first',7,'[1,0]'),(2,'甲','second',9,'[2,0]');",
+        "INSERT INTO u VALUES (1,'甲😀','other',7,'[0,0]');",
+        "CREATE VECTOR INDEX ti ON t(v);",
+        "CREATE VECTOR INDEX ui ON u(v);",
+        t, u, t,
+        "UPDATE t SET c='a' WHERE id=1;", t,
+        "DELETE FROM t WHERE id=1;",
+        "INSERT INTO t VALUES (1,'甲','reinserted',7,'[0,0]');", t,
+        "BEGIN;",
+        "UPDATE t SET n=0 WHERE id=1;", t,
+        "ROLLBACK;", t,
+        "BEGIN;",
+        "UPDATE t SET body='committed', v='[0,0]' WHERE id=2;",
+        "UPDATE t SET v='[2,0]' WHERE id=1;",
+        "COMMIT;", t,
+        "CREATE VECTOR INDEX ti2 ON t(v);", t,
+    ].into_iter().map(str::to_owned).collect();
+    for budget in [8 << 20, 1 << 20] {
+        let data = Data::new();
+        let r = session_with_hot_budget(&data, &sql, budget);
+        assert!(r.iter().all(|x| x["ok"] == true), "{r:?}");
+        assert_eq!(r[6]["rows"], json!([[1, "甲", "first"]]));
+        assert_eq!(r[7]["rows"], json!([[1, "甲😀", "other"]]));
+        assert_eq!(r[8]["rows"], r[6]["rows"]);
+        assert_eq!(r[10]["rows"], json!([[2, "甲", "second"]]));
+        assert_eq!(r[13]["rows"], json!([[1, "甲", "reinserted"]]));
+        assert_eq!(r[16]["rows"], r[10]["rows"]);
+        assert_eq!(r[18]["rows"], r[13]["rows"]);
+        assert_eq!(r[23]["rows"], json!([[2, "甲", "committed"]]));
+        assert_eq!(r[25]["rows"], r[23]["rows"]);
+        let recovered = session_with_hot_budget(&data, &[t.into(), u.into()], budget);
+        assert_eq!(recovered[0]["rows"], r[23]["rows"]);
+        assert_eq!(recovered[1]["rows"], r[7]["rows"]);
+    }
+}
+
+#[test]
+fn oversized_hot_build_row_falls_back_to_exact_wal_scan() {
+    let body = "x".repeat(400_000);
+    let insert = format!("INSERT INTO t VALUES (1,'{body}','[0,0]'),(2,'small','[1,0]');");
+    let r = run(&[
+        "CREATE TABLE t (id BIGINT PRIMARY KEY,body VARCHAR(500000),v VECTOR(2));",
+        &insert,
+        "CREATE VECTOR INDEX vi ON t(v);",
+        "SELECT id FROM t ORDER BY L2_DISTANCE(v,'[0,0]') LIMIT 2;",
+        "SELECT id FROM t WHERE body='small' ORDER BY L2_DISTANCE(v,'[0,0]') LIMIT 2;",
+    ]);
+    assert_eq!(r[3]["rows"], json!([[1], [2]]));
+    assert_eq!(r[4]["rows"], json!([[2]]));
 }

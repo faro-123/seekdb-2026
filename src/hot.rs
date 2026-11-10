@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::mem::size_of;
 
-use crate::distance::SquaredL2;
+use crate::distance::{DistanceBounds, SquaredL2};
 use crate::storage::{Field, HotRead, Store};
 use crate::types::{DataType, Schema, Value};
 use crate::{Error, Result};
@@ -48,6 +48,34 @@ pub(crate) struct Hit {
     pub slot: usize,
 }
 
+#[derive(Clone, Copy)]
+struct Estimate(f64);
+
+impl PartialEq for Estimate {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for Estimate {}
+impl PartialOrd for Estimate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Estimate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+fn retain_smallest<T: Ord>(heap: &mut BinaryHeap<T>, k: usize, value: T) {
+    if heap.len() < k {
+        heap.push(value);
+    } else if heap.peek().is_some_and(|worst| value < *worst) {
+        *heap.peek_mut().unwrap() = value;
+    }
+}
+
 impl HotTable {
     pub fn row(&self, slot: usize) -> &HotRow {
         &self.rows[slot]
@@ -84,16 +112,13 @@ impl HotTable {
             key: self.rows[slot].key,
             slot,
         };
-        if hits.len() < k {
-            hits.push(hit);
-        } else if let Some(mut worst) = hits.peek_mut()
-            && hit < *worst
-        {
-            *worst = hit;
-        }
+        retain_smallest(hits, k, hit);
     }
 
     pub fn select(&self, q: &[f32], k: usize, matches: impl Fn(usize) -> bool) -> Vec<Hit> {
+        if let Some(hits) = self.screened(q, k, &matches) {
+            return hits;
+        }
         let mut hits = BinaryHeap::with_capacity(k.min(self.rows.len()));
         for (slot, vector) in self.vectors.chunks_exact(self.dim).enumerate() {
             if matches(slot) {
@@ -101,6 +126,47 @@ impl HotTable {
             }
         }
         hits.into_sorted_vec()
+    }
+
+    fn screened(&self, q: &[f32], k: usize, matches: &impl Fn(usize) -> bool) -> Option<Vec<Hit>> {
+        let bounds = DistanceBounds::new(self.dim)?;
+        let slots = self.rows.len();
+        let heap_capacity = k.min(slots);
+        // Estimates and both heaps can coexist. Leave room for query bookkeeping.
+        if slots * size_of::<f64>() + heap_capacity * (size_of::<Hit>() + size_of::<Estimate>())
+            > WORK_BYTES - (64 << 10)
+        {
+            return None;
+        }
+        let mut estimates = Vec::with_capacity(slots);
+        let mut upper = BinaryHeap::with_capacity(heap_capacity);
+        for (slot, vector) in self.vectors.chunks_exact(self.dim).enumerate() {
+            if !matches(slot) {
+                estimates.push(f64::INFINITY);
+                continue;
+            }
+            let estimate = bounds.estimate(vector, q);
+            if !estimate.is_finite() {
+                return None;
+            }
+            estimates.push(estimate);
+            retain_smallest(&mut upper, k, Estimate(estimate));
+        }
+        let Some(largest) = upper.peek() else {
+            return Some(Vec::new());
+        };
+        // upper(estimate) is monotone for this query. Using estimates in the
+        // heap gives the same Kth upper bound without widening each entry.
+        let threshold = bounds.upper(largest.0);
+        let mut hits = BinaryHeap::with_capacity(heap_capacity);
+        for (slot, estimate) in estimates.into_iter().enumerate() {
+            // At least K exact distances are <= threshold if K rows match.
+            // Include equality so even unresolved ties reach the exact key.
+            if bounds.lower(estimate) <= threshold {
+                self.offer(&mut hits, k, slot, q, self.vector(slot));
+            }
+        }
+        Some(hits.into_sorted_vec())
     }
 
     fn build(

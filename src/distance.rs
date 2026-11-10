@@ -90,3 +90,71 @@ impl PartialOrd for SquaredL2 {
         Some(self.cmp(other))
     }
 }
+
+pub(crate) struct DistanceBounds {
+    lower_factor: f64,
+    upper_factor: f64,
+}
+
+impl DistanceBounds {
+    pub fn new(dim: usize) -> Option<Self> {
+        if !(1..1_000_000).contains(&dim) {
+            return None;
+        }
+        // f32 widens exactly. Every nonzero delta has magnitude at least 2^-149
+        // and at most 2^129. Squares and their positive sums are normal f64s.
+        // In round-to-nearest, each term sees two subtraction error factors, one
+        // multiplication, at most dim lane additions and eight final additions.
+        // Thus estimate/exact lies in [1-gamma,1+gamma] with
+        // gamma = (dim+11)*u/(1-(dim+11)*u), u = EPSILON/2.
+        // This exactly representable slack exceeds gamma/(1-gamma) throughout
+        // the supported range, covering inversion of the relative-error bound.
+        let slack = 16.0 * (dim as f64 + 4.0) * f64::EPSILON;
+        Some(Self {
+            lower_factor: 1.0 - slack,
+            upper_factor: 1.0 + slack,
+        })
+    }
+
+    pub fn estimate(&self, row: &[f32], q: &[f32]) -> f64 {
+        debug_assert_eq!(row.len(), q.len());
+        let (row_chunks, row_tail) = row.as_chunks::<8>();
+        let (q_chunks, q_tail) = q.as_chunks::<8>();
+        let mut sums = [0.0; 8];
+        for (a, b) in row_chunks.iter().zip(q_chunks) {
+            for lane in 0..8 {
+                let delta = f64::from(a[lane]) - f64::from(b[lane]);
+                sums[lane] += delta * delta;
+            }
+        }
+        for (&a, &b) in row_tail.iter().zip(q_tail) {
+            let delta = f64::from(a) - f64::from(b);
+            sums[0] += delta * delta;
+        }
+        sums.into_iter().sum()
+    }
+
+    pub fn lower(&self, estimate: f64) -> f64 {
+        (estimate * self.lower_factor).next_down().max(0.0)
+    }
+
+    pub fn upper(&self, estimate: f64) -> f64 {
+        (estimate * self.upper_factor).next_up()
+    }
+}
+
+#[cfg(test)]
+mod screening_tests {
+    use super::*;
+
+    #[test]
+    fn interval_encloses_nonzero_subnormal_squared_distance() {
+        let bounds = DistanceBounds::new(17).expect("17 dimensions must support screening");
+        let mut row = [0.0; 17];
+        row[16] = f32::from_bits(1);
+        let estimate = bounds.estimate(&row, &[0.0; 17]);
+        let squared = 2.0_f64.powi(-298);
+        assert!(bounds.lower(estimate) <= squared && squared <= bounds.upper(estimate));
+        assert!(bounds.lower(estimate) > 0.0);
+    }
+}
