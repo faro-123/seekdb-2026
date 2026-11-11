@@ -11,8 +11,9 @@ COPY --from=build /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib/x86_64-linux-gnu/libg
 COPY --from=build /lib/x86_64-linux-gnu/libc.so.6 /lib/x86_64-linux-gnu/libc.so.6
 COPY --from=build /lib/x86_64-linux-gnu/libm.so.6 /lib/x86_64-linux-gnu/libm.so.6
 COPY --from=build /lib64/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
-COPY --from=build --chown=10001:10001 /build/target/release/minivectordb /minivectordb
-COPY --from=build --chown=10001:10001 /runtime-data /data
-USER 10001:10001
+COPY --from=build /build/target/release/minivectordb /minivectordb
+COPY --from=build /runtime-data /data
+# The driver can bind a private, root-owned case directory at /data.
+USER 0:0
 WORKDIR /data
 ENTRYPOINT ["/minivectordb"]

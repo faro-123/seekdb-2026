@@ -23,6 +23,8 @@ JSONL
 
 可用 `cargo build --locked --release` 直接构建。工作区现有 `../devtools/docker/compose.yaml` 提供相同的 Linux Rust 1.99.1 环境。依赖由 `Cargo.lock` 锁定，数据库核心使用 Rust 标准库和自研实现，serde/serde_json 负责序列化。
 
+镜像默认以 UID/GID `0:0` 启动，以兼容 root 拥有的私有 `/data` 绑定目录。复用旧镜像以 UID/GID `10001:10001` 创建的本地数据卷时，在 `docker run` 增加 `--user 10001:10001`。
+
 ## 存储和执行
 
 - `src/protocol.rs` 在恢复后发送 ready，原样回传 JSON id，逐请求刷新。shutdown 放弃显式事务的暂存修改。
