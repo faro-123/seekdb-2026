@@ -91,6 +91,18 @@ impl PartialOrd for SquaredL2 {
     }
 }
 
+// The half scan only avoids row-by-row software expansion with both features.
+pub(crate) fn supports_compact_screening() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        avx::Kernel::detect().is_some() && std::is_x86_feature_detected!("f16c")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
 pub(crate) struct DistanceBounds {
     lower_factor: f64,
     upper_factor: f64,
@@ -120,7 +132,7 @@ impl DistanceBounds {
             #[cfg(target_arch = "x86_64")]
             avx: avx::Kernel::detect(),
             #[cfg(target_arch = "x86_64")]
-            f16c: std::is_x86_feature_detected!("f16c"),
+            f16c: supports_compact_screening(),
         })
     }
 

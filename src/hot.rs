@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::mem::size_of;
 
-use crate::distance::{DistanceBounds, SquaredL2};
+use crate::distance::{DistanceBounds, SquaredL2, supports_compact_screening};
 use crate::half;
 use crate::storage::VectorData;
 use crate::storage::{Field, HotRead, Store};
@@ -227,7 +227,7 @@ impl HotTable {
         // Estimates and both heaps can coexist. Leave room for query bookkeeping.
         if slots * size_of::<f64>()
             + heap_capacity * (size_of::<Hit>() + size_of::<Estimate>())
-            + self.dim * size_of::<f32>()
+            + usize::from(!self.vectors.half.is_empty()) * self.dim * size_of::<f32>()
             > WORK_BYTES - (64 << 10)
         {
             return None;
@@ -273,6 +273,7 @@ impl HotTable {
         embedding: usize,
         fields: &[usize],
         budget: usize,
+        compact: bool,
     ) -> Result<Option<Self>> {
         let DataType::Vector(dim) = schema.columns[embedding].kind else {
             unreachable!("hot scan requires a bound vector");
@@ -304,7 +305,7 @@ impl HotTable {
         let mut text_bytes = [0; MAX_FIELDS];
         let mut rows = 0;
         let mut packed = 0;
-        let mut expanded = Vec::with_capacity(dim);
+        let mut expanded = Vec::with_capacity(if compact { dim } else { 0 });
         if !scan_rows(store, schema, embedding, fields, &mut buffer, |cell| {
             match cell {
                 Cell::Row(..) => {
@@ -318,9 +319,11 @@ impl HotTable {
                             "hot vector dimension differs from schema",
                         ));
                     }
-                    expanded.clear();
-                    values.append(&mut expanded)?;
-                    if expanded.iter().all(|&value| half::pack(value).is_some()) {
+                    if compact {
+                        expanded.clear();
+                        values.append(&mut expanded)?;
+                    }
+                    if compact && expanded.iter().all(|&value| half::pack(value).is_some()) {
                         packed += 1;
                         bytes += dim * size_of::<u16>();
                     } else {
@@ -374,9 +377,17 @@ impl HotTable {
                     table.rows.push(HotRow { key, offset });
                 }
                 Cell::Embedding(values) if values.len() == dim => {
-                    expanded.clear();
-                    values.append(&mut expanded)?;
-                    table.vectors.push(&expanded)?;
+                    if !compact {
+                        let raw = &mut table.vectors.raw;
+                        if raw.len() + dim > raw.capacity() {
+                            return Ok(false);
+                        }
+                        values.append(raw)?;
+                    } else {
+                        expanded.clear();
+                        values.append(&mut expanded)?;
+                        table.vectors.push(&expanded)?;
+                    }
                 }
                 Cell::Scalar(col, value) => match (&mut table.columns[col].values, value) {
                     (Scalar::Int(values), Field::Int(b)) if values.len() < rows => {
@@ -472,6 +483,7 @@ enum Snapshot {
 
 pub(crate) struct HotCache {
     budget: usize,
+    compact: bool,
     snapshot: Snapshot,
 }
 
@@ -488,6 +500,7 @@ impl HotCache {
     fn with_budget(budget: usize) -> Self {
         Self {
             budget,
+            compact: supports_compact_screening(),
             snapshot: Snapshot::Empty,
         }
     }
@@ -544,10 +557,11 @@ impl HotCache {
         // Evict before counting or allocating the next table, including column expansion.
         self.invalidate();
         union[..count].sort_unstable();
-        self.snapshot = match HotTable::build(store, schema, vector, &union[..count], budget)? {
-            Some(table) => Snapshot::Ready(table),
-            None => Snapshot::Denied(schema.name.clone()),
-        };
+        self.snapshot =
+            match HotTable::build(store, schema, vector, &union[..count], budget, self.compact)? {
+                Some(table) => Snapshot::Ready(table),
+                None => Snapshot::Denied(schema.name.clone()),
+            };
         Ok(self.table())
     }
 }
@@ -631,6 +645,7 @@ mod tests {
             .unwrap();
         store.commit(&changes).unwrap();
         let mut cache = HotCache::with_budget(MAX_BYTES);
+        cache.compact = true;
         let table = cache
             .get(&store, &schema, 2, &[1])
             .unwrap()
@@ -654,6 +669,14 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        let mut raw_cache = HotCache::with_budget(MAX_BYTES);
+        raw_cache.compact = false;
+        let raw = raw_cache.get(&store, &schema, 2, &[1]).unwrap().unwrap();
+        assert_eq!(raw.vectors.raw, [1.0, 2.0]);
+        assert!(raw.vectors.half.is_empty() && raw.vectors.slots.is_empty());
+        let hits = raw.select(&[1.0, 2.0], 1, |_| true);
+        assert_eq!(hits[0].key, 7);
+        assert_eq!(hits[0].distance().to_bits(), 0.0_f64.to_bits());
         drop(changes);
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
