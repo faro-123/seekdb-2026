@@ -9,6 +9,7 @@ mod read_batch;
 mod sql;
 mod storage;
 mod types;
+mod vector_codec;
 
 pub use protocol::run;
 

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::disk_index::{DiskIndex, Entries, Entry};
 use crate::read_batch::{OffsetBatch, WalRead};
 use crate::types::{DataType, Schema, Value};
+use crate::vector_codec::{self, HEADER_BYTES, Header as PackedHeader};
 use crate::{Error, Result};
 
 pub(crate) type Catalog = BTreeMap<String, Schema>;
@@ -101,10 +102,15 @@ fn encode(op: &Op) -> Result<Vec<u8>> {
                         string(&mut b, x)?;
                     }
                     Value::Vector(x) => {
+                        let tag = b.len();
                         b.push(2);
                         number(&mut b, x.len())?;
-                        for f in x {
-                            b.extend_from_slice(&f.to_le_bytes());
+                        if vector_codec::try_pack(x, &mut b) {
+                            b[tag] = 3;
+                        } else {
+                            for f in x {
+                                b.extend_from_slice(&f.to_le_bytes());
+                            }
                         }
                     }
                 }
@@ -144,8 +150,42 @@ fn read_body(r: &mut impl Read, data: &mut Vec<u8>) -> Result<bool> {
 pub(crate) enum Field<'a> {
     Int(&'a [u8; 8]),
     Text(&'a [u8]),
-    Vector(&'a [[u8; 4]]),
+    Vector(VectorData<'a>),
 }
+#[derive(Clone, Copy)]
+pub(crate) enum VectorData<'a> {
+    Raw(&'a [[u8; 4]]),
+    Packed {
+        header: PackedHeader,
+        count: usize,
+        payload: &'a [u8],
+    },
+}
+impl VectorData<'_> {
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Raw(bytes) => bytes.len(),
+            Self::Packed { count, .. } => *count,
+        }
+    }
+    pub fn append(self, out: &mut Vec<f32>) -> Result<()> {
+        match self {
+            Self::Raw(bytes) => out.extend(bytes.iter().map(|&b| f32::from_le_bytes(b))),
+            Self::Packed {
+                header,
+                count,
+                payload,
+            } => header.decode(count, payload, out)?,
+        }
+        Ok(())
+    }
+    fn values(self) -> Result<Vec<f32>> {
+        let mut out = Vec::with_capacity(self.len());
+        self.append(&mut out)?;
+        Ok(out)
+    }
+}
+
 impl Field<'_> {
     fn equals(&self, value: &Value) -> bool {
         match (self, value) {
@@ -163,27 +203,38 @@ fn read_field<'a>(r: &mut &'a [u8]) -> Result<Field<'a>> {
     match tag {
         0 => Ok(Field::Int(take(r, 8)?.first_chunk().unwrap())),
         1 => Ok(Field::Text(sized_bytes(r, 1)?)),
-        2 => Ok(Field::Vector(sized_bytes(r, 4)?.as_chunks::<4>().0)),
+        2 => Ok(Field::Vector(VectorData::Raw(
+            sized_bytes(r, 4)?.as_chunks::<4>().0,
+        ))),
+        3 => {
+            let count = u32read(r)? as usize;
+            let header = PackedHeader::parse(take(r, HEADER_BYTES)?.first_chunk().unwrap());
+            let payload = take(r, header.payload_len(count)?)?;
+            Ok(Field::Vector(VectorData::Packed {
+                header,
+                count,
+                payload,
+            }))
+        }
         _ => Err(corrupt("invalid value tag")),
     }
 }
 fn put_header<'a>(r: &mut &'a [u8]) -> Result<(&'a [u8], i64, u32)> {
     Ok((sized_bytes(r, 1)?, i64read(r)?, u32read(r)?))
 }
-fn decode_vector(bytes: &[[u8; 4]]) -> Vec<f32> {
-    bytes.iter().map(|&b| f32::from_le_bytes(b)).collect()
-}
 fn decode_values(mut r: &[u8], count: u32) -> Result<(Vec<Value>, Option<usize>)> {
     let bytes = r.len();
     let mut row = Vec::new();
     let mut vector_at = None;
     for _ in 0..count {
+        let field_at = bytes - r.len();
         row.push(match read_field(&mut r)? {
             Field::Int(b) => Value::Int(i64::from_le_bytes(*b)),
             Field::Text(b) => Value::Text(decode_text(b)?),
             Field::Vector(b) => {
-                vector_at = Some(bytes - r.len() - std::mem::size_of_val(b));
-                Value::Vector(decode_vector(b))
+                // Derived index locations include the vector field tag and dimension.
+                vector_at = Some(field_at);
+                Value::Vector(b.values()?)
             }
         });
     }
@@ -566,13 +617,10 @@ impl Store {
             .vectors
             .get(&schema.name)
             .ok_or_else(|| corrupt("vector index missing"))?;
-        let bytes = dim
-            .checked_mul(4)
-            .ok_or_else(|| corrupt("vector size overflow"))?;
         Ok(VectorView {
             slots: OffsetBatch::new(index.entries()?),
             log: WalRead::Direct(File::open(&self.path)?),
-            bytes,
+            dim,
             buffer: Vec::new(),
         })
     }
@@ -581,7 +629,7 @@ impl Store {
 pub(crate) struct VectorView {
     slots: OffsetBatch<Entries>,
     log: WalRead,
-    bytes: usize,
+    dim: usize,
     buffer: Vec<u8>,
 }
 
@@ -594,9 +642,36 @@ impl VectorView {
 
     pub fn read_at(&mut self, offset: u64) -> Result<Vec<f32>> {
         self.log.seek(SeekFrom::Start(offset))?;
-        self.buffer.resize(self.bytes, 0);
-        self.log.read_exact(&mut self.buffer)?;
-        Ok(decode_vector(self.buffer.as_chunks::<4>().0))
+        let mut field = [0; 5];
+        self.log.read_exact(&mut field)?;
+        let dim = u32::from_le_bytes(field[1..].try_into().unwrap()) as usize;
+        if dim != self.dim {
+            return Err(corrupt("vector index dimension differs from schema"));
+        }
+        match field[0] {
+            2 => {
+                let bytes = dim
+                    .checked_mul(4)
+                    .ok_or_else(|| corrupt("vector size overflow"))?;
+                self.buffer.resize(bytes, 0);
+                self.log.read_exact(&mut self.buffer)?;
+                VectorData::Raw(self.buffer.as_chunks::<4>().0).values()
+            }
+            3 => {
+                let mut bytes = [0; HEADER_BYTES];
+                self.log.read_exact(&mut bytes)?;
+                let header = PackedHeader::parse(&bytes);
+                self.buffer.resize(header.payload_len(dim)?, 0);
+                self.log.read_exact(&mut self.buffer)?;
+                VectorData::Packed {
+                    header,
+                    count: dim,
+                    payload: &self.buffer,
+                }
+                .values()
+            }
+            _ => Err(corrupt("vector index points to non-vector")),
+        }
     }
 }
 
@@ -816,6 +891,43 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encodes_losslessly_and_keeps_raw_fallback_compatible() {
+        let vectors = [
+            (
+                (-64..64).map(|x| (x as f32) / 1024.0).collect::<Vec<_>>(),
+                3,
+            ),
+            (vec![1.0, -0.0, f32::from_bits(1), f32::MAX, f32::MIN], 2),
+        ];
+        for (vector, expected_tag) in vectors {
+            let op = Op::Put {
+                table: "docs".into(),
+                key: 7,
+                row: vec![Value::Int(7), Value::Vector(vector.clone())],
+            };
+            let bytes = encode(&op).unwrap();
+            let mut fields = &bytes[5..];
+            let (_, _, count) = put_header(&mut fields).unwrap();
+            assert_eq!(count, 2);
+            assert!(matches!(read_field(&mut fields).unwrap(), Field::Int(_)));
+            assert_eq!(fields[0], expected_tag);
+            let record = read_record(&mut &bytes[..]).unwrap().unwrap();
+            let Op::Put { row, .. } = record.op else {
+                panic!("expected row")
+            };
+            let Value::Vector(actual) = &row[1] else {
+                panic!("expected vector")
+            };
+            assert!(
+                actual
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .eq(vector.iter().map(|v| v.to_bits()))
+            );
+        }
+    }
 
     #[test]
     fn rejected_equality_row_does_not_decode_its_vector() {

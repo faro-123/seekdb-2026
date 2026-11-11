@@ -4,6 +4,7 @@ use std::collections::BinaryHeap;
 use std::mem::size_of;
 
 use crate::distance::{DistanceBounds, SquaredL2};
+use crate::storage::VectorData;
 use crate::storage::{Field, HotRead, Store};
 use crate::types::{DataType, Schema, Value};
 use crate::{Error, Result};
@@ -223,7 +224,7 @@ impl HotTable {
                 }
                 _ => {}
             }
-            bytes <= budget
+            Ok(bytes <= budget)
         })? {
             return Ok(None);
         }
@@ -263,9 +264,7 @@ impl HotTable {
                 Cell::Embedding(values)
                     if values.len() == dim && table.vectors.len() < rows * dim =>
                 {
-                    table
-                        .vectors
-                        .extend(values.iter().map(|&b| f32::from_le_bytes(b)));
+                    values.append(&mut table.vectors)?;
                 }
                 Cell::Scalar(col, value) => match (&mut table.columns[col].values, value) {
                     (Scalar::Int(values), Field::Int(b)) if values.len() < rows => {
@@ -278,11 +277,11 @@ impl HotTable {
                         bytes.extend_from_slice(value);
                         offsets.push(bytes.len());
                     }
-                    _ => return false,
+                    _ => return Ok(false),
                 },
-                _ => return false,
+                _ => return Ok(false),
             }
-            true
+            Ok(true)
         })?;
         if !complete || table.rows.len() != rows || table.vectors.len() != rows * dim {
             return Err(Error::new(
@@ -296,7 +295,7 @@ impl HotTable {
 
 enum Cell<'a> {
     Row(i64, u64),
-    Embedding(&'a [[u8; 4]]),
+    Embedding(VectorData<'a>),
     Scalar(usize, Field<'a>),
 }
 
@@ -307,7 +306,7 @@ fn scan_rows(
     embedding: usize,
     selected: &[usize],
     buffer: &mut [u8],
-    mut visit: impl FnMut(Cell<'_>) -> bool,
+    mut visit: impl FnMut(Cell<'_>) -> Result<bool>,
 ) -> Result<bool> {
     let mut view = store.view(&schema.name, None)?.batched();
     loop {
@@ -326,7 +325,7 @@ fn scan_rows(
                 "hot row column count differs from schema",
             ));
         }
-        if !visit(Cell::Row(key, offset)) {
+        if !visit(Cell::Row(key, offset))? {
             return Ok(false);
         }
         let mut wanted = selected.iter().enumerate().peekable();
@@ -342,7 +341,7 @@ fn scan_rows(
             } else {
                 continue;
             };
-            if !visit(cell) {
+            if !visit(cell)? {
                 return Ok(false);
             }
         }
