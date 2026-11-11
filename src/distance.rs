@@ -96,6 +96,8 @@ pub(crate) struct DistanceBounds {
     upper_factor: f64,
     #[cfg(target_arch = "x86_64")]
     avx: Option<avx::Kernel>,
+    #[cfg(target_arch = "x86_64")]
+    f16c: bool,
 }
 
 impl DistanceBounds {
@@ -117,6 +119,8 @@ impl DistanceBounds {
             upper_factor: 1.0 + slack,
             #[cfg(target_arch = "x86_64")]
             avx: avx::Kernel::detect(),
+            #[cfg(target_arch = "x86_64")]
+            f16c: std::is_x86_feature_detected!("f16c"),
         })
     }
 
@@ -127,6 +131,19 @@ impl DistanceBounds {
             return kernel.estimate(row, q);
         }
         estimate_scalar(row, q)
+    }
+
+    pub fn estimate_half(&self, row: &[u16], q: &[f32], scratch: &mut Vec<f32>) -> f64 {
+        debug_assert_eq!(row.len(), q.len());
+        #[cfg(target_arch = "x86_64")]
+        if self.f16c
+            && let Some(kernel) = &self.avx
+        {
+            return kernel.estimate_half(row, q);
+        }
+        scratch.clear();
+        scratch.extend(row.iter().copied().map(crate::half::expand));
+        self.estimate(scratch, q)
     }
 
     pub fn lower(&self, estimate: f64) -> f64 {
@@ -163,7 +180,8 @@ fn reduce(mut sums: [f64; 8], row_tail: &[f32], q_tail: &[f32]) -> f64 {
 #[allow(unsafe_code)]
 mod avx {
     use std::arch::x86_64::{
-        _mm_setr_ps, _mm256_add_pd, _mm256_cvtps_pd, _mm256_mul_pd, _mm256_setzero_pd,
+        _mm_loadu_ps, _mm_loadu_si128, _mm_setr_ps, _mm256_add_pd, _mm256_castps256_ps128,
+        _mm256_cvtph_ps, _mm256_cvtps_pd, _mm256_extractf128_ps, _mm256_mul_pd, _mm256_setzero_pd,
         _mm256_storeu_pd, _mm256_sub_pd,
     };
 
@@ -178,6 +196,52 @@ mod avx {
             // SAFETY: the only constructor checks OS support and AVX availability.
             unsafe { estimate(row, q) }
         }
+
+        pub(super) fn estimate_half(&self, row: &[u16], q: &[f32]) -> f64 {
+            // SAFETY: the caller checks F16C and construction checks AVX support.
+            unsafe { estimate_half(row, q) }
+        }
+    }
+
+    #[target_feature(enable = "avx,f16c")]
+    fn estimate_half(row: &[u16], q: &[f32]) -> f64 {
+        let (rows, row_tail) = row.as_chunks::<8>();
+        let (queries, q_tail) = q.as_chunks::<8>();
+        let mut low = _mm256_setzero_pd();
+        let mut high = _mm256_setzero_pd();
+        for (a, b) in rows.iter().zip(queries) {
+            // SAFETY: a and b each have eight elements; loads are unaligned.
+            let (packed, q_lo, q_hi) = unsafe {
+                (
+                    _mm_loadu_si128(a.as_ptr().cast()),
+                    _mm_loadu_ps(b.as_ptr()),
+                    _mm_loadu_ps(b.as_ptr().add(4)),
+                )
+            };
+            // Each stored half reconstructs the original float32 exactly.
+            let expanded = _mm256_cvtph_ps(packed);
+            let d_lo = _mm256_sub_pd(
+                _mm256_cvtps_pd(_mm256_castps256_ps128(expanded)),
+                _mm256_cvtps_pd(q_lo),
+            );
+            let d_hi = _mm256_sub_pd(
+                _mm256_cvtps_pd(_mm256_extractf128_ps::<1>(expanded)),
+                _mm256_cvtps_pd(q_hi),
+            );
+            low = _mm256_add_pd(low, _mm256_mul_pd(d_lo, d_lo));
+            high = _mm256_add_pd(high, _mm256_mul_pd(d_hi, d_hi));
+        }
+        let mut sums = [0.0; 8];
+        // SAFETY: the two stores cover disjoint four-element regions.
+        unsafe {
+            _mm256_storeu_pd(sums.as_mut_ptr(), low);
+            _mm256_storeu_pd(sums.as_mut_ptr().add(4), high);
+        }
+        let mut tail = [0.0; 7];
+        for (out, &bits) in tail.iter_mut().zip(row_tail) {
+            *out = crate::half::expand(bits);
+        }
+        super::reduce(sums, &tail[..row_tail.len()], q_tail)
     }
 
     #[target_feature(enable = "avx")]
@@ -213,6 +277,52 @@ mod avx {
 #[cfg(test)]
 mod screening_tests {
     use super::*;
+
+    #[test]
+    fn half_estimates_match_expanded_lanes_and_tails() {
+        let finite: Vec<_> = (0..=u16::MAX)
+            .filter(|bits| bits & 0x7c00 != 0x7c00)
+            .collect();
+        let values: Vec<_> = finite.iter().copied().map(crate::half::expand).collect();
+        let queries: Vec<_> = (0..finite.len())
+            .map(|i| match i % 4 {
+                0 => f32::from_bits(1),
+                1 => f32::MAX,
+                2 => -0.0,
+                _ => 0.33333334,
+            })
+            .collect();
+        for dim in [1, 7, 8, 9, 17, 127, 128, 2053] {
+            let mut bounds = DistanceBounds::new(dim).unwrap();
+            let mut scratch = Vec::new();
+            for ((row, packed), q) in values
+                .chunks_exact(dim)
+                .zip(finite.chunks_exact(dim))
+                .zip(queries.chunks_exact(dim))
+            {
+                let expected = estimate_scalar(row, q);
+                assert_eq!(
+                    bounds.estimate_half(packed, q, &mut scratch).to_bits(),
+                    expected.to_bits()
+                );
+            }
+            #[cfg(target_arch = "x86_64")]
+            {
+                bounds.f16c = false;
+                bounds.avx = None;
+            }
+            for ((row, packed), q) in values
+                .chunks_exact(dim)
+                .zip(finite.chunks_exact(dim))
+                .zip(queries.chunks_exact(dim))
+            {
+                assert_eq!(
+                    bounds.estimate_half(packed, q, &mut scratch).to_bits(),
+                    estimate_scalar(row, q).to_bits()
+                );
+            }
+        }
+    }
 
     #[test]
     fn interval_encloses_nonzero_subnormal_squared_distance() {

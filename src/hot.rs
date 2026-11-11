@@ -4,6 +4,7 @@ use std::collections::BinaryHeap;
 use std::mem::size_of;
 
 use crate::distance::{DistanceBounds, SquaredL2};
+use crate::half;
 use crate::storage::VectorData;
 use crate::storage::{Field, HotRead, Store};
 use crate::types::{DataType, Schema, Value};
@@ -32,12 +33,95 @@ struct HotColumn {
     values: Scalar,
 }
 
+enum HotVector<'a> {
+    Raw(&'a [f32]),
+    Half(&'a [u16]),
+}
+
+struct HotVectors {
+    dim: usize,
+    half: Vec<u16>,
+    raw: Vec<f32>,
+    // Only mixed snapshots need per-row positions. The high bit selects raw.
+    slots: Vec<u32>,
+}
+
+impl HotVectors {
+    const RAW: u32 = 1 << 31;
+
+    fn new(dim: usize, rows: usize, packed: usize) -> Self {
+        Self {
+            dim,
+            half: Vec::with_capacity(packed * dim),
+            raw: Vec::with_capacity((rows - packed) * dim),
+            slots: Vec::with_capacity(if packed == 0 || packed == rows {
+                0
+            } else {
+                rows
+            }),
+        }
+    }
+
+    fn push(&mut self, row: &[f32]) -> Result<()> {
+        let start = self.half.len();
+        // No temporary packed vector. Undo partial appends if a value needs raw.
+        let position = if self.half.len() + self.dim <= self.half.capacity()
+            && row.iter().all(|&value| {
+                half::pack(value).is_some_and(|bits| {
+                    self.half.push(bits);
+                    true
+                })
+            }) {
+            start as u32
+        } else {
+            self.half.truncate(start);
+            if self.raw.len() + self.dim > self.raw.capacity() {
+                return Err(Error::new("storage_error", "hot raw vector count changed"));
+            }
+            let offset = self.raw.len() as u32;
+            self.raw.extend_from_slice(row);
+            Self::RAW | offset
+        };
+        if self.slots.capacity() != 0 {
+            self.slots.push(position);
+        }
+        Ok(())
+    }
+
+    fn at(&self, slot: usize) -> HotVector<'_> {
+        let position = if !self.slots.is_empty() {
+            self.slots[slot]
+        } else if self.half.is_empty() {
+            Self::RAW | (slot * self.dim) as u32
+        } else {
+            (slot * self.dim) as u32
+        };
+        let start = (position & !Self::RAW) as usize;
+        if position & Self::RAW == 0 {
+            HotVector::Half(&self.half[start..][..self.dim])
+        } else {
+            HotVector::Raw(&self.raw[start..][..self.dim])
+        }
+    }
+
+    fn expanded<'a>(&'a self, slot: usize, scratch: &'a mut Vec<f32>) -> &'a [f32] {
+        match self.at(slot) {
+            HotVector::Raw(row) => row,
+            HotVector::Half(row) => {
+                scratch.clear();
+                scratch.extend(row.iter().copied().map(half::expand));
+                scratch
+            }
+        }
+    }
+}
+
 pub(crate) struct HotTable {
     name: String,
     embedding: usize,
     dim: usize,
     primary: usize,
-    vectors: Vec<f32>,
+    vectors: HotVectors,
     rows: Vec<HotRow>,
     columns: Vec<HotColumn>,
 }
@@ -88,8 +172,8 @@ impl HotTable {
         &self.rows[slot]
     }
 
-    pub fn vector(&self, slot: usize) -> &[f32] {
-        &self.vectors[slot * self.dim..][..self.dim]
+    pub fn vector<'a>(&'a self, slot: usize, scratch: &'a mut Vec<f32>) -> &'a [f32] {
+        self.vectors.expanded(slot, scratch)
     }
 
     pub fn compare(&self, slot: usize, column: usize, wanted: &Value) -> Ordering {
@@ -127,9 +211,10 @@ impl HotTable {
             return hits;
         }
         let mut hits = BinaryHeap::with_capacity(k.min(self.rows.len()));
-        for (slot, vector) in self.vectors.chunks_exact(self.dim).enumerate() {
+        let mut scratch = Vec::new();
+        for slot in 0..self.rows.len() {
             if matches(slot) {
-                self.offer(&mut hits, k, slot, q, vector);
+                self.offer(&mut hits, k, slot, q, self.vector(slot, &mut scratch));
             }
         }
         hits.into_sorted_vec()
@@ -140,19 +225,25 @@ impl HotTable {
         let slots = self.rows.len();
         let heap_capacity = k.min(slots);
         // Estimates and both heaps can coexist. Leave room for query bookkeeping.
-        if slots * size_of::<f64>() + heap_capacity * (size_of::<Hit>() + size_of::<Estimate>())
+        if slots * size_of::<f64>()
+            + heap_capacity * (size_of::<Hit>() + size_of::<Estimate>())
+            + self.dim * size_of::<f32>()
             > WORK_BYTES - (64 << 10)
         {
             return None;
         }
         let mut estimates = Vec::with_capacity(slots);
         let mut upper = BinaryHeap::with_capacity(heap_capacity);
-        for (slot, vector) in self.vectors.chunks_exact(self.dim).enumerate() {
+        let mut scratch = Vec::new();
+        for slot in 0..slots {
             if !matches(slot) {
                 estimates.push(f64::INFINITY);
                 continue;
             }
-            let estimate = bounds.estimate(vector, q);
+            let estimate = match self.vectors.at(slot) {
+                HotVector::Raw(row) => bounds.estimate(row, q),
+                HotVector::Half(row) => bounds.estimate_half(row, q, &mut scratch),
+            };
             if !estimate.is_finite() {
                 return None;
             }
@@ -170,7 +261,7 @@ impl HotTable {
             // At least K exact distances are <= threshold if K rows match.
             // Include equality so even unresolved ties reach the exact key.
             if bounds.lower(estimate) <= threshold {
-                self.offer(&mut hits, k, slot, q, self.vector(slot));
+                self.offer(&mut hits, k, slot, q, self.vector(slot, &mut scratch));
             }
         }
         Some(hits.into_sorted_vec())
@@ -190,7 +281,7 @@ impl HotTable {
         if dim == 0 || dim > MAX_BODY / size_of::<f32>() || schema.columns.len() > MAX_COLUMNS {
             return Ok(None);
         }
-        let mut row_width = size_of::<HotRow>() + dim * size_of::<f32>();
+        let mut row_width = size_of::<HotRow>();
         // Include table name, column descriptors, and each text column's initial offset.
         let mut bytes = size_of::<Self>()
             + size_of::<HotCache>()
@@ -212,11 +303,29 @@ impl HotTable {
         let mut buffer = vec![0; MAX_BODY];
         let mut text_bytes = [0; MAX_FIELDS];
         let mut rows = 0;
+        let mut packed = 0;
+        let mut expanded = Vec::with_capacity(dim);
         if !scan_rows(store, schema, embedding, fields, &mut buffer, |cell| {
             match cell {
                 Cell::Row(..) => {
                     bytes += row_width;
                     rows += 1;
+                }
+                Cell::Embedding(values) => {
+                    if values.len() != dim {
+                        return Err(Error::new(
+                            "storage_error",
+                            "hot vector dimension differs from schema",
+                        ));
+                    }
+                    expanded.clear();
+                    values.append(&mut expanded)?;
+                    if expanded.iter().all(|&value| half::pack(value).is_some()) {
+                        packed += 1;
+                        bytes += dim * size_of::<u16>();
+                    } else {
+                        bytes += dim * size_of::<f32>();
+                    }
                 }
                 Cell::Scalar(col, Field::Text(value)) => {
                     bytes += value.len();
@@ -229,12 +338,15 @@ impl HotTable {
             return Ok(None);
         }
 
+        if packed != 0 && packed != rows && bytes + rows * size_of::<u32>() > budget {
+            return Ok(None);
+        }
         let mut table = Self {
             name: schema.name.clone(),
             embedding,
             dim,
             primary: schema.primary,
-            vectors: Vec::with_capacity(rows * dim),
+            vectors: HotVectors::new(dim, rows, packed),
             rows: Vec::with_capacity(rows),
             columns: fields
                 .iter()
@@ -261,10 +373,10 @@ impl HotTable {
                 Cell::Row(key, offset) if table.rows.len() < rows => {
                     table.rows.push(HotRow { key, offset });
                 }
-                Cell::Embedding(values)
-                    if values.len() == dim && table.vectors.len() < rows * dim =>
-                {
-                    values.append(&mut table.vectors)?;
+                Cell::Embedding(values) if values.len() == dim => {
+                    expanded.clear();
+                    values.append(&mut expanded)?;
+                    table.vectors.push(&expanded)?;
                 }
                 Cell::Scalar(col, value) => match (&mut table.columns[col].values, value) {
                     (Scalar::Int(values), Field::Int(b)) if values.len() < rows => {
@@ -283,7 +395,11 @@ impl HotTable {
             }
             Ok(true)
         })?;
-        if !complete || table.rows.len() != rows || table.vectors.len() != rows * dim {
+        if !complete
+            || table.rows.len() != rows
+            || table.vectors.half.len() != packed * dim
+            || table.vectors.raw.len() != (rows - packed) * dim
+        {
             return Err(Error::new(
                 "storage_error",
                 "committed rows changed during hot scan build",
@@ -446,6 +562,31 @@ mod tests {
     static SEQ: AtomicU64 = AtomicU64::new(0);
 
     #[test]
+    fn mixed_snapshot_preserves_half_bits_and_raw_values() {
+        let inputs = [
+            [1.0, -0.0, f32::from_bits(0x33800000)],
+            [f32::from_bits(1), f32::MAX, 0.33333334],
+            [2.0, -1.0, 65504.0],
+        ];
+        let mut vectors = HotVectors::new(3, 3, 2);
+        for row in &inputs {
+            vectors.push(row).unwrap();
+        }
+        assert_eq!(vectors.half.len(), 6);
+        assert_eq!(vectors.raw.len(), 3);
+        let mut scratch = Vec::new();
+        for (i, row) in inputs.iter().enumerate() {
+            assert!(
+                vectors
+                    .expanded(i, &mut scratch)
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .eq(row.iter().map(|v| v.to_bits()))
+            );
+        }
+    }
+
+    #[test]
     fn snapshot_reuses_contiguous_vectors_and_declines_low_budget() {
         let path = std::env::temp_dir().join(format!(
             "mv-hot-{}-{}",
@@ -494,14 +635,15 @@ mod tests {
             .get(&store, &schema, 2, &[1])
             .unwrap()
             .expect("committed row must become hot");
-        assert_eq!(table.vectors, [1.0, 2.0]);
-        let address = table.vectors.as_ptr();
+        assert_eq!(table.vector(0, &mut Vec::new()), [1.0, 2.0]);
+        let address = table.vectors.half.as_ptr();
         assert_eq!(
             cache
                 .get(&store, &schema, 2, &[])
                 .unwrap()
                 .unwrap()
                 .vectors
+                .half
                 .as_ptr(),
             address,
             "subset predicates must reuse the same allocation"

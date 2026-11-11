@@ -621,24 +621,27 @@ fn try_hot(
     } else {
         Some(store.view(&schema.name, None)?)
     };
+    let mut expanded = Vec::new();
     for hit in hits {
         let row = table.row(hit.slot);
         if let Some(source) = &mut source {
             let projected = QueryRow::Full(source.read_at(Position::Committed(row.offset))?);
             writer.row(&plan.projections, &projected)?;
         } else {
-            let vector = table.vector(hit.slot);
             writer.row_with(&plan.projections, |projection, out| {
                 match projection {
                     BoundExpr::Column(i) if *i == schema.primary => {
                         serde_json::to_writer(out, &row.key)?;
                     }
-                    BoundExpr::Column(_) => Value::write_vector_json(vector, out)?,
+                    BoundExpr::Column(_) => {
+                        Value::write_vector_json(table.vector(hit.slot, &mut expanded), out)?
+                    }
                     BoundExpr::Distance(_, query) => {
                         let distance = if query == q {
                             hit.distance()
                         } else {
-                            SquaredL2::between(vector, query).distance()
+                            SquaredL2::between(table.vector(hit.slot, &mut expanded), query)
+                                .distance()
                         };
                         serde_json::to_writer(out, &distance)?;
                     }
