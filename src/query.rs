@@ -117,8 +117,13 @@ fn indexed_row(key: i64, vector: Vec<f32>, primary: usize, embedding: usize) -> 
 }
 
 impl Scan<'_> {
-    fn read_at(&mut self, candidate: &Candidate) -> Result<QueryRow> {
-        match (self, candidate.position) {
+    fn read_at(&mut self, candidate: Candidate) -> Result<QueryRow> {
+        let position = candidate.position;
+        let key = candidate.primary;
+        // Sorting is finished for this hit. Release wide keys before decoding
+        // the original row for projection.
+        drop(candidate);
+        match (self, position) {
             (Self::Table { source, .. }, position) => Ok(QueryRow::Full(source.read_at(position)?)),
             (
                 Self::Vector {
@@ -128,7 +133,7 @@ impl Scan<'_> {
                 },
                 Position::Vector(offset),
             ) => Ok(indexed_row(
-                candidate.primary,
+                key,
                 source.read_at(offset)?,
                 *primary,
                 *embedding,
@@ -404,6 +409,8 @@ struct Runs {
     sequence: usize,
     levels: Vec<Vec<PathBuf>>,
     artifacts: BTreeSet<PathBuf>,
+    max_candidate_bytes: usize,
+    head_budget: usize,
 }
 impl Runs {
     fn new(base: PathBuf) -> Self {
@@ -412,7 +419,15 @@ impl Runs {
             sequence: 0,
             levels: Vec::new(),
             artifacts: BTreeSet::new(),
+            max_candidate_bytes: 0,
+            head_budget: 16 << 20,
         }
+    }
+    fn fan_in(&self) -> usize {
+        // Bound retained decoded heads separately from the run-generation
+        // budget. A merge also needs one JSON input line and its decoded key.
+        // At least two heads are necessary to make progress for oversized keys.
+        (self.head_budget / self.max_candidate_bytes.max(1)).clamp(2, 16)
     }
     fn path(&mut self) -> PathBuf {
         self.sequence += 1;
@@ -430,8 +445,11 @@ impl Runs {
             self.levels.resize_with(level + 1, Vec::new);
         }
         self.levels[level].push(path);
-        if self.levels[level].len() == 16 {
-            let paths = std::mem::take(&mut self.levels[level]);
+        // A later wide key can lower the fan-in while a level already contains
+        // many narrow-key runs. Consume bounded batches even after that change.
+        while self.levels[level].len() >= self.fan_in() {
+            let fan_in = self.fan_in();
+            let paths: Vec<_> = self.levels[level].drain(..fan_in).collect();
             let path = self.path();
             let mut out = BufWriter::new(File::create(&path)?);
             merge(&paths, |c| {
@@ -449,6 +467,9 @@ impl Runs {
         Ok(())
     }
     fn spill(&mut self, buffer: &mut Vec<Candidate>) -> Result<()> {
+        for c in buffer.iter() {
+            self.max_candidate_bytes = self.max_candidate_bytes.max(c.bytes());
+        }
         buffer.sort_unstable();
         let path = self.path();
         let mut out = BufWriter::new(File::create(&path)?);
@@ -462,9 +483,10 @@ impl Runs {
     }
     fn final_paths(&mut self) -> Result<Vec<PathBuf>> {
         let mut paths: Vec<_> = self.levels.iter_mut().flat_map(std::mem::take).collect();
-        while paths.len() > 16 {
+        let fan_in = self.fan_in();
+        while paths.len() > fan_in {
             let mut next = Vec::new();
-            for batch in paths.chunks(16) {
+            for batch in paths.chunks(fan_in) {
                 let path = self.path();
                 let mut out = BufWriter::new(File::create(&path)?);
                 merge(batch, |c| {
@@ -755,6 +777,9 @@ pub(crate) fn execute(
             position,
         };
         let size = c.bytes();
+        // A spill may recursively merge many runs; the scan row is no longer
+        // needed once its keys and storage position have been captured.
+        drop(row);
         if heap_mode {
             if heap.len() < limit {
                 bytes += size;
@@ -781,7 +806,7 @@ pub(crate) fn execute(
     }
     if heap_mode {
         for c in heap.into_sorted_vec() {
-            writer.row(&plan.projections, &view.read_at(&c)?)?;
+            writer.row(&plan.projections, &view.read_at(c)?)?;
         }
     } else {
         if !buffer.is_empty() {
@@ -792,10 +817,73 @@ pub(crate) fn execute(
             if writer.count >= limit {
                 return Ok(false);
             }
-            writer.row(&plan.projections, &view.read_at(&c)?)?;
+            writer.row(&plan.projections, &view.read_at(c)?)?;
             Ok(true)
         })?;
     }
     writer.finish()?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn shrinking_fan_in_merges_pending_narrow_runs_in_bounded_batches() {
+        let root = std::env::temp_dir().join(format!(
+            "mv-merge-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, AtomicOrdering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let mut runs = Runs::new(root.join("sort"));
+        // Scale the same production algorithm down to make this regression cheap.
+        runs.head_budget = 4096;
+        let mut expected = Vec::new();
+        for key in 0..33 {
+            let text = if key < 15 {
+                format!("a{key:02}")
+            } else {
+                format!(
+                    "{}{}",
+                    "z".repeat(4096),
+                    if key % 2 == 0 { 'a' } else { 'b' }
+                )
+            };
+            expected.push((text.clone(), key));
+            let mut buffer = vec![Candidate {
+                keys: vec![(SortValue::Text(text), false)],
+                primary: key,
+                position: Position::Committed(0),
+            }];
+            runs.spill(&mut buffer).unwrap();
+            if key == 14 {
+                assert_eq!(runs.levels[0].len(), 15);
+            }
+        }
+        assert_eq!(runs.fan_in(), 2);
+        let paths = runs.final_paths().unwrap();
+        assert!(paths.len() <= 2);
+        let mut actual = Vec::new();
+        merge(&paths, |c| {
+            let (SortValue::Text(text), false) = c.keys.into_iter().next().unwrap() else {
+                panic!("unexpected sort key")
+            };
+            actual.push((text, c.primary));
+            Ok(true)
+        })
+        .unwrap();
+        expected.sort();
+        assert_eq!(actual, expected);
+        drop(runs);
+        assert_eq!(
+            fs::read_dir(&root).unwrap().count(),
+            0,
+            "all intermediate runs must be reclaimed"
+        );
+        fs::remove_dir(root).unwrap();
+    }
 }
