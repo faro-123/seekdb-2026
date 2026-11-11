@@ -1,0 +1,7 @@
+[
+  {},
+  {"affected_rows": 5},
+  {"columns": ["id", "distance"], "rows": [[3, 5.0], [8, 5.0]]},
+  {"columns": ["id", "distance"], "rows": [[3, 5.0], [8, 5.0], [2, 6.0]]},
+  {"columns": ["id", "distance"], "rows": []}
+]

@@ -1,0 +1,12 @@
+CREATE TABLE docs (id BIGINT PRIMARY KEY, category VARCHAR(8), content VARCHAR(16), embedding VECTOR(2));
+INSERT INTO docs VALUES (1,'keep','one','[0,0]'),(2,'keep','two','[3,4]');
+CREATE VECTOR INDEX docs_vec ON docs(embedding);
+BEGIN;
+UPDATE docs SET embedding = '[0,5]' WHERE id = 1;
+INSERT INTO docs VALUES (3,'keep','three','[0,0]'),(4,'keep','bad','[1]');
+SELECT id, L2_DISTANCE(embedding, '[0,0]') AS distance FROM docs WHERE category = 'keep' ORDER BY distance LIMIT 10;
+COMMIT;
+--restart
+SELECT id, L2_DISTANCE(embedding, '[0,0]') AS distance FROM docs WHERE category = 'keep' ORDER BY distance LIMIT 10;
+--mode ann
+SELECT id, L2_DISTANCE(embedding, '[0,0]') AS distance FROM docs WHERE category = 'keep' ORDER BY distance LIMIT 10;

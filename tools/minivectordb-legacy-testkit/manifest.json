@@ -1,0 +1,27 @@
+{
+  "version": "minivectordb-local-legacy-v1",
+  "scope": "additional-local-cases",
+  "cases": [
+    {
+      "id": "legacy_filtered_topk",
+      "group": "vector",
+      "test": "cases/legacy_filtered_topk.test",
+      "result": "cases/legacy_filtered_topk.result",
+      "statements": 5
+    },
+    {
+      "id": "legacy_index_rollback_restart",
+      "group": "transaction",
+      "test": "cases/legacy_index_rollback_restart.test",
+      "result": "cases/legacy_index_rollback_restart.result",
+      "statements": 17
+    },
+    {
+      "id": "legacy_failed_index_tx",
+      "group": "transaction",
+      "test": "cases/legacy_failed_index_tx.test",
+      "result": "cases/legacy_failed_index_tx.result",
+      "statements": 10
+    }
+  ]
+}

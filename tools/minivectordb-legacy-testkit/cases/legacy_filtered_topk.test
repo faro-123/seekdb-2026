@@ -1,0 +1,5 @@
+CREATE TABLE docs (id BIGINT PRIMARY KEY, category VARCHAR(8), content VARCHAR(16), embedding VECTOR(2));
+INSERT INTO docs VALUES (8,'keep','eight','[3,4]'),(3,'keep','three','[-3,-4]'),(1,'skip','one','[0,0]'),(2,'keep','two','[0,6]'),(5,'skip','five','[0,1]');
+SELECT id, L2_DISTANCE(embedding, '[0,0]') AS distance FROM docs WHERE category = 'keep' ORDER BY distance LIMIT 2;
+SELECT id, L2_DISTANCE(embedding, '[0,0]') AS distance FROM docs WHERE category = 'keep' ORDER BY distance LIMIT 9;
+SELECT id, L2_DISTANCE(embedding, '[0,0]') AS distance FROM docs WHERE category = 'none' ORDER BY distance LIMIT 9;

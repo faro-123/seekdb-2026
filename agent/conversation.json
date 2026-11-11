@@ -1,900 +1,1389 @@
 {
-  "material": {
-    "status": "working_draft",
-    "competition": "OceanBase 2026 加赛 MiniVectorDB",
-    "rules": "agent-learning-evidence-v3-unbounded",
-    "rules_source": "https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6",
-    "rules_checked_on": "2026-11-10",
-    "baseline": {
-      "commit": "93abe64d33bc8e1eb8c618df8efe32df0f7d4472",
-      "tree": "1bf758589c2d35c505ec801c00091a59bddee768",
-      "binary_sha256": "5a763becf46a575ac2d949296a7e768a6375f16f0eee5deb945576f23a1f696e",
-      "image_id": "sha256:5fc131aef2f3b86ce23bf6a3965b239f4231a73543bb13d84ba84308c327c911",
-      "docker_tag": "minivectordb:baseline-20261110-r1",
-      "upstream_round2": "f4d4e26653af823a7601668802f80e374ad6643c"
-    },
-    "coverage": "摘录来自三条与赛题直接相关的聊天及本地基线执行日志。所属轮次时间使用北京时间，工具的 started_at 保留原始 UTC。",
-    "provenance": "content 来自实际消息，excerpt 为来源文件原行的选录。input_context、scope 和 evidence_index 是侧端编写的定位说明。用户转发的 Agent 草稿单独标注。"
+ "material": {
+  "competition": "OceanBase 2026 MiniVectorDB 加赛",
+  "rules_version": "agent-learning-evidence-v3-unbounded",
+  "rules_source": "https://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6",
+  "covered_period": "2026-11-09 至 2026-11-11（北京时间）",
+  "provenance": "conversations 是可定位的实际发出消息或明确标记的摘录。仅去除尾空白、脱敏本地路径、摘取附件之后的文字。多轮提示由侧端协助组织，user 角色表明实际发送，起草和独立技术理解须以具体原话和上下文判断。prompt_digest 是整理后的任务摘要，execution、output 和 decision 是从实际记录归纳的执行与结果，不是补写用户发言。raw_results 是所列工具或指标文件摘录。dimension 为阅读线索。未采用候选与已保留版各自标明。",
+  "reference_format": "消息使用实际 turn_id、message_id 及 turn 起始 UTC。sent_prompt_evidence 指向本文件原文，output、raw_results/*/output 和 final_implementation/output 提供对应结果。外部文件路径仅用于追溯。",
+  "threads": {
+   "main": {
+    "名称": "主端实现",
+    "thread_id": "01a1c46c-3ecd-7191-b859-6b69e2cd62a4"
+   },
+   "platform": {
+    "名称": "规则与基线",
+    "thread_id": "01a1c4f9-2076-7563-9000-9dfd06d4f944"
+   },
+   "side": {
+    "名称": "侧端提示与迁移",
+    "thread_id": "01a1c5f6-dbfd-7070-85a7-f4e33978bff8"
+   },
+   "admission": {
+    "名称": "独立准入诊断",
+    "thread_id": "01a1c886-1e45-7c22-b715-bc17648ec755"
+   }
+  }
+ },
+ "common_local_measurement": {
+  "scope": "除注明的探针或异常外，完整性能使用 Linux amd64 容器、2 CPU、2 GiB、128 PID、禁网、无 swap；10,000×128、每批 100 行、预热后 1000 条 exact K=10、500 条等值过滤。写入/查询有独立目录和 cgroup。T 为驱动端实际 JSONL 往返；B/M 覆盖装载、准备和写回并计文件页缓存。",
+  "input_sha256": "85f54aad7649c5b3ea1cefd2c7d4677dab35e3c3dedf359d68a3f5340645738a",
+  "e_reference_order": "写 T(ms)/B(MiB)/M(MiB)、查 T(ms)/B(MiB)/M(MiB)",
+  "fixed_local_reference": [
+   1875.783932,
+   6.75,
+   10.0234375,
+   13109.863073,
+   7.12890625,
+   10.17578125
+  ],
+  "aggregation": "同轮六项计算 E，再取各版本轮次中位数。候选采用门槛依各轮预登记，内核与直连诊断单独记录。"
+ },
+ "conversations": [
+  {
+   "id": "q01",
+   "role": "user",
+   "thread": "platform",
+   "turn_id": "01a1beae-72ca-7273-9d8d-4d5fde07ac13",
+   "message_id": "01a1beae-75e9-79e0-a9d4-88f28fee554c",
+   "turn_started_utc": "2026-11-09T05:01:06.000Z",
+   "turn_status": "completed",
+   "attribution": "用户实际发送",
+   "content": "能查到官方的基线值吗？帮我算一下综合指标 E 的理论上限是多少。"
   },
-  "conversations": [
+  {
+   "id": "q02",
+   "role": "user",
+   "thread": "platform",
+   "turn_id": "01a1c102-9e2f-7a03-b546-8de4000253e6",
+   "message_id": "01a1c102-a21b-7a92-aa5b-4d4ffaccf9f6",
+   "turn_started_utc": "2026-11-09T15:52:16.000Z",
+   "turn_status": "interrupted",
+   "attribution": "用户实际发送",
+   "content": "逆向目前公开的测试题包，估算一下性能基线和综合指标 E 的理论上限"
+  },
+  {
+   "id": "q03",
+   "role": "user",
+   "thread": "platform",
+   "turn_id": "01a1c443-7d90-7af3-88f9-1b6675864c4b",
+   "message_id": "01a1c446-06f1-7291-824c-ef010a4bac2a",
+   "turn_started_utc": "2026-11-10T07:01:59.000Z",
+   "turn_status": "completed",
+   "attribution": "用户实际发送",
+   "content": "结合仓库更新分析"
+  },
+  {
+   "id": "q04",
+   "role": "user",
+   "thread": "platform",
+   "turn_id": "01a1c455-2ca3-7d53-b35c-ee97a695847e",
+   "message_id": "01a1c455-2fad-7f42-a784-243d9a9d552c",
+   "turn_started_utc": "2026-11-10T07:21:18.000Z",
+   "turn_status": "completed",
+   "attribution": "用户实际发送",
+   "content": "结合测算结果和最新题包，分析 MiniVectorDB 要拿性能满分，写入、查询、I/O 和内存应该优先优化哪些地方。"
+  },
+  {
+   "id": "p00",
+   "role": "user",
+   "thread": "main",
+   "turn_id": "01a1c46c-46f5-77a0-8946-11deda0fbe31",
+   "message_id": "01a1c46c-50bd-7aa2-9fc0-339344e9acda",
+   "turn_started_utc": "2026-11-10T07:46:32.000Z",
+   "turn_status": "failed",
+   "attribution": "实际发送的正确性基线提示。它明确要求侧端协作，起草者独立贡献不作推断。",
+   "content": "```yaml\n你负责在主端实现并跑通 MiniVectorDB；侧端负责生成后续提示词和整理 conversation.json。本轮请推进真实数据库实现与验证，不要停留在方案说明。\n\n工作区：\n<工作区>\n\n实现仓库：\n<工作区>/seekdb-2026-competition-round2\n\n先读取项目 AGENTS.md、全局项目记忆，以及以下材料：\n- <工作区>/MiniVectorDB-实现方案分析.md\n- <工作区>/2026-11-10_旧赛题磁盘审计/审计与迁移建议.md\n- <工作区>/2026-11-10_旧赛题磁盘审计/本次适配与清理.md\n- <工作区>/seekdb-2026-competition-round2/STDIO_PROTOCOL.md\n- <工作区>/seekdb-2026-competition-round2/tools/minivectordb-legacy-testkit/README.md\n- <工作区>/analysis/performance-priorities-20261110.md\n\n核对官方题包更新。旧分析中“通信协议尚未公布”等历史描述，以当前 STDIO_PROTOCOL.md 和实际驱动为准。\n\n本轮目标：完成一版可构建、可启动、可持久化、可以通过真实驱动执行 SQL 的数据库，先建立正确性基线，为后续性能优化保留清晰接口。\n\n执行要求：\n\n1. 检查现有实现、Git 状态和构建环境，复用已有代码与 devtools/docker 工具链，保留其他会话的改动。如果尚无实现，优先沿用现有 Rust 开发环境开始实现。存储、执行、事务和向量检索核心自行实现，依赖范围遵守题面。\n\n2. 打通完整运行链路：\nJSONL 请求 → SQL 解析与校验 → 执行和事务视图 → /data 存储与恢复 → JSONL 响应。\n恢复完成后主动发送规定的 ready 对象；每个请求准确回传 id 并立即 flush；shutdown 回滚未提交事务并正常退出。补齐从源码构建的 Dockerfile。\n\n3. 逐步实现题面要求的 SQL、BIGINT/VARCHAR/VECTOR 类型、增删改查、精确 TopK、过滤检索、索引维护、事务和恢复。\n重点保证：\n- BIGINT 不经浮点中转；\n- 向量先存为有限 float32，再计算距离；\n- 先过滤、后 TopK，距离并列按主键排序；\n- 多行语句失败不能部分生效，事务之前成功的修改仍可提交；\n- 已确认提交在强杀后保留，未提交修改不部分生效；\n- 数据超过内存预算时存在分页或流式处理路径。\n先用精确检索建立独立可验证的基线，再依据实际测量决定近似加速方案。\n\n4. 复用已经完成的旧赛题迁移成果：\n通过官方 protocol_check/run.py 运行公开用例，再通过 --package 接入 tools/minivectordb-legacy-testkit。\n现有迁移包包含3个用例、32条SQL，覆盖过滤与并列、索引事务回滚和提交后重启、失败语句原子性。\n使用包内的小型数据生成器和独立 oracle 检查实际数据库结果；离线数据格式不能当作通信协议，reference.json 不能充当数据库输出。该 oracle 的精确计算适合小规模正确性验证，不要直接拿它跑大规模性能测量。\n\n5. 沿用旧题的验证方法：\n固定版本及输入指纹，每次实验使用独立数据目录，保留命令、退出码和原始 stdout/stderr；失败后解释原因、修复并复测。\n不要直接运行旧 AMD/MySQL 删表脚本，不套用 FTS/CAGRA 的评分与参数。\n迁移包已有的工具自测通过，不代表这些 SQL 已在新数据库上通过。\n\n6. 优先跑通官方公开用例、迁移用例，以及针对强杀恢复和大于内存数据的补充检查。\n记录真实失败，不修改预期结果来迎合实现。公开测试通过不能表述为正式隐藏测试全部通过。\n功能跑通后保存一个可复现版本，再进入性能优化；已有代理测算不是官方基线。\n\n主端本轮交付：\n- 实际修改的文件与设计取舍；\n- 构建、启动及复现命令；\n- 官方公开用例和迁移用例的逐项结果；\n- 补充验证的输入、原始结果与日志路径；\n- 当前版本标识、未通过项目及下一步建议。\n\nconversation.json 由侧端维护。你只保存真实开发和执行证据，并提供事实报告；不代写学生发言、理解或反思。\n```"
+  },
+  {
+   "id": "a17",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c46c-46f5-77a0-8946-11deda0fbe31",
+   "message_id": "msg_0031ed2f9b2c1ffb016af2cf77d02c87d0a69241140460f225",
+   "turn_started_utc": "2026-11-10T07:46:32.000Z",
+   "attribution": "实际 Agent 进度或回复摘录。",
+   "content": "边界测试发现了一个公开用例未覆盖的问题：长十进制向量先转 float64 再转 float32，会在舍入中点附近存错值。已改为保留十进制文本并直接舍入到 float32，预期值未改；回归测试从失败转为通过，目前 9 项 Rust 集成测试全部通过。"
+  },
+  {
+   "id": "a00",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c483-5ef7-7d33-b7d7-654498255040",
+   "message_id": "msg_091c0d0a19dfaf4a016af2d57bad1887d09bb73605d8f74e67",
+   "turn_started_utc": "2026-11-10T08:11:46.000Z",
+   "attribution": "主端 Agent 最终回复首段原文摘录。",
+   "content": "MiniVectorDB 正确性基线已实现并保存为本地提交 `93abe64d33bc8e1eb8c618df8efe32df0f7d4472`。验证镜像为 `minivectordb:baseline-20261110-r1`。从提交归档重新构建后，二进制 SHA-256 与验证镜像一致。 [源码归档](<工作区>/analysis/implementation-20261110/baseline-source.zip)"
+  },
+  {
+   "id": "p01",
+   "role": "user",
+   "thread": "main",
+   "turn_id": "01a1c4b9-a0dc-74c2-ba37-48fd93a1ff4f",
+   "message_id": "01a1c4b9-a487-7000-9cad-c4b0e90e67c2",
+   "turn_started_utc": "2026-11-10T09:11:02.000Z",
+   "turn_status": "completed",
+   "attribution": "实际发送的性能基线提示，工作区有侧端提示文档。保留发送时的 Markdown 转义。",
+   "content": "\\# MiniVectorDB 下一轮 · 建立性能基线并定位开销\\\n\\\n本轮目标是用真实数据库建立可复现的写入和 TopK 性能基线，检验一个可能影响优化顺序的查询路径差异。按调查模式执行，建议使用高推理强度。\\\n\\\n完成条件是交付可重跑的基准入口、三轮写入和查询原始指标、正确性对照及一次查询路径诊断。拿到可比较的结果后回报，留出一轮根据证据选择实现改动。遇到结果错误、超时或资源采集缺失时，保留实际失败输出和最小复现，继续完成其余可执行检查。\\\n\\\n\\## 起点\\\n\\\n实现仓库为 \\`<工作区>/seekdb-2026-competition-round2\\`。主端聊天关联的 \\`MinivectorDB 2\\` 是另一个目录。先在实现仓库运行 \\`git rev-parse --show-toplevel HEAD\\` 和 \\`git status --short --branch\\`。基线提交为 \\`93abe64d33bc8e1eb8c618df8efe32df0f7d4472\\`，镜像为 \\`minivectordb:baseline-20261110-r1\\`，Linux 二进制 SHA-256 为 \\`5a763becf46a575ac2d949296a7e768a6375f16f0eee5deb945576f23a1f696e\\`。核对镜像指纹后使用。需要重建时使用报告中的源码归档和构建命令。若工作树已有更新，保留现有改动，从隔离的基线归档取样。\\\n\\\n读 \\`STDIO_PROTOCOL.md\\`、\\`protocol_check/config.json\\` 和 \\`../analysis/implementation-20261110/report.md\\`。基线镜像的公开用例为 20/20、迁移用例为 3/3。核对官方题面第 3.3 节和配套分支是否有更新。以下负载按当前题面默认值和公开配置设计，正式参数以组织方冻结版本为准。 [官方题面]\\(https\\://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6) · [配套分支]\\(https\\://github.com/oceanbase/seekdb/tree/2026-competition-round2)\\\n\\\n\\## 执行\\\n\\\n1\\. \\*\\*跑真实基准。\\*\\* 用 Linux amd64 镜像和真实 JSONL 单客户端，逐条发送请求并等待响应。固定种子、行宽、类别分布、输入 SHA-256、预热流程及资源限制。以 2 CPU、2 GiB、128 PID、禁用 swap、禁网和独立 \\`/data\\` 作为当前本地配置。写入从空表开始，10,000 行、128 维，每批 100 行并提交。查询装载并准备向量索引后，在 \\`exact\\` 模式下跑 1,000 次 K=10，其中 500 次等值过滤。每项各跑三轮，每轮使用独立容器、cgroup 和数据目录。查找可复用的驱动和记录器，必要时新增最小的本地基准入口，复用 \\`tools/dev_capture.py\\` 保留命令、指纹、退出码与原始日志。\\\n2\\. \\*\\*分开记录 T、B、M。\\*\\* 驱动在容器外测端到端墙钟。写入 T 覆盖全部批次直至最后的持久化成功响应。查询 T 覆盖正式查询序列，单列准备和预热耗时。B/M 从数据库启动覆盖到计量结束和相关写回完成，包含装载、索引准备、预热和页缓存。驱动及事后校验与数据库 cgroup 隔离。按 cgroup v2 专用数据设备的 \\`io.stat\\` 读写字节增量和 \\`memory.peak\\` 取值。无法确认归属时将对应指标标为缺测，并保留采集输出和原因。结果标为本地基线，六项正式基线未发布时以六项实测值比较。\\\n3\\. \\*\\*校验实际结果。\\*\\* 计时结束后对照写入记录的数量、内容和重启后的状态。对真实查询响应做独立真值比对，核对 ID、距离、并列主键顺序以及过滤结果数量。分别记录两组 Recall@10，正式门槛均为 0.95，本轮 \\`exact\\` 按精确结果核对。完整规模真值在计量外计算，复用小样本 oracle 交叉验证极近距离、并列和空过滤集合。镜像重建后按仓库 README 复跑 \\`protocol_check/run.py\\` 的握手、公开包和迁移包。\\\n4\\. \\*\\*做一次配对诊断。\\*\\* 先核对 \\`src/query.rs\\` 的 \\`Plan::covered_vector\\` 和 \\`src/storage.rs\\` 的 \\`VectorView\\`。在独立诊断数据中把 \\`category\\` 固定为同一值，在事务外使用同一索引和查询向量，投影只取主键与 \\`L2_DISTANCE\\`，按距离排序并限制 K=10。配对比较无 WHERE 和命中全表的 \\`WHERE category = 'all'\\`，互换执行顺序并核对 TopK 响应一致。两组应有相同数量的候选向量。记录路径耗时与波动，区分观察到的路径差异与读盘、解码、距离计算等仍需验证的归因。把这一诊断与默认混合负载分开报告。\\\n\\\n\\## 回传给侧端\\\n\\\n交付逐轮表格，列出版本、输入 SHA-256、写入和查询的 T/B/M、两组 Recall、回归结果和缺测项。附复现命令、输出目录，以及足以放入 \\`conversation.json\\` 的短原始片段，含一条实际请求、对应响应和资源读数。给出数据最支持的一个优化切入点、可能代价和能推翻判断的观测。保留真实失败。由侧端整理学习材料，参赛者的判断使用实际对话原文。\\"
+  },
+  {
+   "id": "a18",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c4b9-a0dc-74c2-ba37-48fd93a1ff4f",
+   "message_id": "msg_091c0d0a19dfaf4a016af2e2ae4d8087d089ad72119a69243a",
+   "turn_started_utc": "2026-11-10T09:11:02.000Z",
+   "attribution": "实际 Agent 进度或回复摘录。",
+   "content": "第一批完整查询出现了一次 B 缺测。`syncfs` 已成功，设备字节数也连续稳定，但 2 秒观察期内 `file_dirty` 没归零，采集器按规则保留了缺测。其他轮次已观察到归零，我会保留这次原始读数，用更长观察窗口和新数据目录补测这一轮。"
+  },
+  {
+   "id": "a01",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c4b9-a0dc-74c2-ba37-48fd93a1ff4f",
+   "message_id": "msg_091c0d0a19dfaf4a016af2e4b2a4b887d0a1114de6804b759f",
+   "turn_started_utc": "2026-11-10T09:11:02.000Z",
+   "attribution": "主端 Agent 最终回复首段原文摘录。",
+   "content": "MiniVectorDB 的本地性能基线已跑完。写入和查询各有三轮完整 T/B/M，使用提交 `93abe64d33bc8e1eb8c618df8efe32df0f7d4472`、镜像 `minivectordb:baseline-20261110-r1`。二进制指纹核对一致，统一输入 SHA-256 为 `85f54aad7649c5b3ea1cefd2c7d4677dab35e3c3dedf359d68a3f5340645738a`。"
+  },
+  {
+   "id": "p02",
+   "role": "user",
+   "thread": "main",
+   "turn_id": "01a1c51a-a97f-7f92-8056-ee2c5b082c93",
+   "message_id": "01a1c51a-af2d-7a70-aca9-e8732e62abe1",
+   "turn_started_utc": "2026-11-10T10:57:01.000Z",
+   "turn_status": "completed",
+   "attribution": "直接观察到的版本决策。上轮数据由主端产生，起草过程未确认。",
+   "content": "**先做窄字段过滤。** 先解码等值谓词所需的字段，再为命中行解码向量。上轮 64 对实验在候选数相同、TopK 结果一致时，完整行路径的配对耗时差中位数为 **5.411 ms**。第一轮用默认混合负载验证实际收益。"
+  },
+  {
+   "id": "a02",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c51a-a97f-7f92-8056-ee2c5b082c93",
+   "message_id": "msg_091c0d0a19dfaf4a016af2fec1a77487d0adf092da2fe8246f",
+   "turn_started_utc": "2026-11-10T10:57:01.000Z",
+   "attribution": "主端 Agent 最终回复首段原文摘录。",
+   "content": "窄字段过滤已实现并保存为本地提交 `4be3a20`。默认混合负载下，1,000 条查询的端到端耗时中位数从 **13.110 秒降到 11.479 秒，减少 12.4%**。三组 A/B 均提速。"
+  },
+  {
+   "id": "p03",
+   "role": "user",
+   "thread": "main",
+   "turn_id": "01a1c539-18bf-75e0-92c9-733f363980b6",
+   "message_id": "01a1c539-1bbd-75e0-920f-2d91d9d80659",
+   "turn_started_utc": "2026-11-10T11:30:15.000Z",
+   "turn_status": "failed",
+   "attribution": "实际发送。与侧端第 2 轮草稿正文大部分一致，保留实际消息。",
+   "content": "# MiniVectorDB 优化第 2 轮 · 降低精确 TopK 扫描成本\n\n从第 1 轮保留的窄字段过滤版本出发，区分精确距离计算与逐行读取、解码和分配的成本。本轮选择其中一项，交付最小候选、正确性结果和三对端到端 A/B。收益不足或回归时，保留当前版本并交付测量结果。\n\n## 起点\n\n在 `<工作区>/seekdb-2026-competition-round2` 核对 Git 根目录、HEAD 和工作树。A 为 `4be3a2078645850aacb536b9a6ef951081068e5c`，镜像 `minivectordb:narrow-filter-20261110-r1`，二进制 SHA-256 为 `4f2852660867e8115b6ac0231f01fd95d85a91735395696004b0edc41b78ed95`。若实现已推进，先核对实际部署版本及本轮目标是否已完成。在本地隔离候选中工作。\n\n读 `../analysis/narrow-filter-20261110/report.md`。第 1 轮候选的混合查询中位数为 11.479 秒，有过滤与无过滤的单条中位数分别为 8.205 ms 和 14.634 ms。专用设备在预热后的测量中读计数为零，仍需区分页缓存读取、分配和算术成本。\n\n## 执行与验收\n\n1. **先拆开成本。** 追踪 `src/query.rs` 的 `BoundExpr::distance`、`sort_value`，`src/distance.rs` 的 `SquaredL2::between`，以及 `src/storage.rs` 的 `VectorView::read_at`。用实际镜像的小规模重复诊断，区分已在内存中的精确距离计算和正常扫描路径开销。可用采样或独立对照程序，诊断开销与正式 A/B 分开。记下依据、假设和能推翻判断的结果。\n2. **只实现一个候选。** 若距离计算占优，先试一次查询绑定后复用查询向量的符号、指数和尾数分解，或其他经对照更有效的单一精确核改动。若逐行读取或分配占优，改为一个有界的读缓冲或分配复用改动。保留现有 WAL、窄字段过滤、事务可见性与通用路径。加速路径须保持原有精确平方距离排序和主键并列顺序，边界超出快路径证明范围时走原有精确算法。\n3. **先校验正确性。** 跑 `cargo test --locked` 和 README 中真实镜像的握手、公开包及迁移包。新增一个能区分候选与错误实现的用例，重点覆盖不同真实距离舍入到同一 float64、真正并列、极端有限 float32 和次正规数。用原独立真值逐条核对默认负载的 TopK ID、顺序和距离。保留有过滤和无过滤的 Recall@10，检查重启后 10,000 行内容，并用另一个种子或维度复测适用边界。\n4. **复用原口径跑三对 A/B。** 参考 `../analysis/narrow-filter-20261110/run_ab.ps1`、`summarize_ab.py` 和 `../analysis/performance-baseline-20261110/verify_results.py`。现有脚本的 baseline 仍是 `93abe64`，在新实验副本中把 A 显式设为 `4be3a20`，分别校验两个镜像的提交和指纹。按 A/B、B/A、A/B 交替，保持同输入、设备归属、容器配额及写回稳定判定。报告每轮写入和查询的 T/B/M，两组延迟中位数与 p95，以及缺测或失败。以第 1 轮 `ab-02/baseline` 的六项中位数为固定本地 E 参照，分别计算 A/B 的三轮 E 再取中位数。先记下同机噪声判定，候选需正确性全过、混合查询的收益稳定超过波动且本地 E 中位数提高。正式 E 使用官方基线。"
+  },
+  {
+   "id": "a03",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c555-ca9e-7e13-b860-595d034f550d",
+   "message_id": "msg_091c0d0a19dfaf4a016af30ce8687887d085bb656e74e4d9a8",
+   "turn_started_utc": "2026-11-10T12:01:36.000Z",
+   "attribution": "主端 Agent 最终回复首段原文摘录。",
+   "content": "**候选 B 达到保留条件**，已保存为隔离提交 `9b357a7`。本轮只改精确距离核，指数差不超过 7 时对齐尾数后平方，超出范围走原算法。"
+  },
+  {
+   "id": "p04",
+   "role": "user",
+   "thread": "main",
+   "turn_id": "01a1c572-061a-75b0-9828-b3d40af7cf7d",
+   "message_id": "01a1c572-0962-76b2-9be8-f291838607ec",
+   "turn_started_utc": "2026-11-10T12:32:26.000Z",
+   "turn_status": "completed",
+   "attribution": "实际发送。与侧端第 3 轮草稿基本一致。",
+   "content": "# MiniVectorDB 优化第 3 轮 · 降低扫描中的 WAL 随机读取成本\n\n按调查模式执行，建议使用高推理强度。本轮在第二轮精确距离核之上，降低查询扫描逐行定位和读取的成本，交付一个有界的候选及三对真实镜像 A/B。完成条件为正确性全过、六项资源完整、混合查询收益超过预先记录的波动且本地 E 中位数提高。若不满足条件，保留 A 并回传候选和诊断结果。\n\n## 先锁定正确起点\n\nA 为 `9b357a765ad90c5f9c90c7eb449fa10342524718`，当前位于\n`<隔离工作树目录>/minivectordb-topk-round2/seekdb-2026-competition-round2`，\n分支 `codex/minivectordb-exact-topk-20261110`。主仓库\n`<工作区>/seekdb-2026-competition-round2`\n仍为第一轮 `4be3a20`。先核对两个位置的根目录、HEAD 和工作树，从 A 建立独立候选，保留现有记录与其他会话的改动。路径或版本有差异时，先定位实际 A，再继续。\n\nA 镜像为 `minivectordb:exact-topk-20261110-r1`，二进制 SHA-256 为\n`e3471d7008fb8b61f0b5b8ae6199158617cdcbaf9e2343d253834903a5b7cd73`。\n读取工作区 `analysis/exact-topk-20261110/report.md`、`version.json`、`score.json`。第二轮混合查询中位数为 11.429 秒，本地 E 中位数为 0.504166。第二轮算术路径的收益已经包含在 A 中。\n\n## 诊断后实现一个候选\n\n1. 沿 `src/query.rs` 的 `Scan` 跟到 `src/storage.rs` 的 `VectorView::read_at`、`View::seek_row` 和 `next_equal`。核对每行 WAL 偏移读取及缓冲分配。`src/disk_index.rs` 的 `Entries` 已用 BufReader 顺序读槽，但槽中的 WAL 偏移可能乱序。先用 A 的真实查询或同路径独立诊断观察偏移局部性、读取次数和读取字节，记录可被反例推翻的瓶颈判断。诊断统计与正式计量分开。\n2. 优先试一个查询内有固定预算的 WAL 读取窗口或块复用方案。依据偏移分布决定是否值得实施，避免对每个随机偏移重新预读大块。明确预算、淘汰和跨块读取规则。支持超过预算的记录及总数据量，复用现有窄字段过滤、精确距离核和 TopK。若窗口复用没有局部性收益，改试一小批可见偏移的有界读取重排，保持最后精确排序与当前记录语义。两种方向择一进入正式候选。\n3. 优先覆盖已提交数据扫描，事务及不满足前提的路径采用现有实现。查询结束后释放窗口状态，避免后续写入、删除、提交、回滚或重启使用过时字节。保留现有 WAL 格式和提交持久性。记录新增匿名内存、页缓存、预读放大及首次查询代价。\n\n## 正确性与真实 A/B\n\n先运行 `cargo test --locked`，按 README 对候选真实镜像复跑握手、公开包和迁移包。针对实际新路径增加回归，覆盖跨块向量与记录、超出缓存预算的行、删除后重插、更新后查询、事务回滚或提交、重启。复用第二轮的 17 维有限 float32 位模式校验和独立真值，保证不同真实距离舍入到同一 float64 时仍正确排序，真正并列按主键升序。复跑 96 MiB 限额下的大于内存数据及强杀恢复场景，记录实际失败和修正复测。\n\n沿用 `analysis/exact-topk-20261110/run_ab.ps1`、`summarize_ab.py`、`score_ab.py` 和 `analysis/performance-baseline-20261110/verify_results.py`。在第三轮独立实验副本中把脚本 baseline 从 `4be3a20` 改为上述 A，并分别核验 A/B 提交、镜像和二进制。每次使用独立空数据目录、容器与 cgroup。\n\n按 A/B、B/A、A/B 交替跑三对。默认输入仍为 10,000 行、128 维、每批 100 行持久化提交，查询 1,000 次、K=10，等值过滤与无过滤各半。保持 2 CPU、2 GiB、128 PID、禁用 swap、设备归属及写回稳定采集口径。驱动和事后校验位于数据库 cgroup 之外。逐条核对两边全部 6,000 条 TopK 响应，以及六次写入重启后的全字段内容。额外用更大正文或另一种过滤选择率检查读取放大的边界。\n\n在看到 B 的正式结果前记录同机 A 的波动和采用门槛。报告每轮写入、查询 T/B/M，过滤与无过滤延迟中位数及 p95，并单列启动、装载、索引和预热成本。B/M 覆盖准备、预热和相关写回，缺测保留原始原因。\n\n本地 E 继续使用 `analysis/narrow-filter-20261110/ab-02/baseline` 的固定六项参照，复用第二轮 `score_ab.py` 的计算。A/B 各轮先计算 E，再分别取三轮中位数。候选须正确性全过，查询提速稳定超过波动且本地 E 中位数提高。若缓存节省耗时但额外内存或 I/O 抵消收益，保留 A 并说明测得的边界。\n\n回传候选提交、镜像与二进制指纹、逐轮六项与 E、复现命令、实际请求和响应、资源读数及采用结论。提供诊断判断如何被实验支持或推翻的事实记录，供侧端整理 conversation。"
+  },
+  {
+   "id": "a19",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c572-061a-75b0-9828-b3d40af7cf7d",
+   "message_id": "msg_091c0d0a19dfaf4a016af3159761a887d09df301b090bdcf7a",
+   "turn_started_utc": "2026-11-10T12:32:26.000Z",
+   "attribution": "实际 Agent 进度或回复摘录。",
+   "content": "补充回归复现了一个读取错误。稀疏读取绕过 `BufReader` 后，回跳可能按旧缓冲位置取到错误字节。我会让所有读取继续经过 `BufReader`，通过底层长度限制控制预读，并重新构建镜像、完整复测。错误字节和首版日志会保留。"
+  },
+  {
+   "id": "a04",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c572-061a-75b0-9828-b3d40af7cf7d",
+   "message_id": "msg_091c0d0a19dfaf4a016af31aabde2087d0be52ee78a51bf1e0",
+   "turn_started_utc": "2026-11-10T12:32:26.000Z",
+   "attribution": "主端 Agent 最终回复首段原文摘录。",
+   "content": "**保留修复版 B `305140b`**。候选采用每批最多 4,096 个偏移重排和 8 KiB 读缓冲，新增预算约 104 KiB。"
+  },
+  {
+   "id": "q05",
+   "role": "user",
+   "thread": "side",
+   "turn_id": "01a1c5a2-3556-7573-8f41-2316cf890943",
+   "message_id": "01a1c5a2-389b-7450-92bf-f9f234e32617",
+   "turn_started_utc": "2026-11-10T13:25:04.000Z",
+   "turn_status": "completed",
+   "attribution": "用户在侧端聊天报告榜单观察。未取得独立榜单快照；仅将其作为该时点提出亚秒目标的动机。",
+   "content": "目前已有35/40得分队伍查询时间在1秒以内，说明远没有达到目标期望。重新查看是否有可以迁移的seekdb文件或者github开源优化，需要找到一个可以尽快提高e值到趋近1的方案"
+  },
+  {
+   "id": "q06",
+   "role": "user",
+   "thread": "side",
+   "turn_id": "01a1c5b5-dcf5-7c11-8db2-e338778f6713",
+   "message_id": "01a1c5b5-eaf6-76a2-b9f7-2953002438c9",
+   "turn_started_utc": "2026-11-10T13:46:32.000Z",
+   "turn_status": "completed",
+   "attribution": "用户要求先检索资源再筛选可迁移方法。句首为用户当时的判断，官方基线仍未知。",
+   "content": "实际上最终都会达到趋近1的本地理论基线值，去github搜索已有方案查看是否可以内容或者方法迁移，需要先搜索资源在做筛选。"
+  },
+  {
+   "id": "p05",
+   "role": "user",
+   "thread": "main",
+   "turn_id": "01a1c5c7-16d9-7c93-84e9-0e09422f9fa5",
+   "message_id": "01a1c5c7-1ed8-72f3-bd6b-9a4305b39050",
+   "turn_started_utc": "2026-11-10T14:05:21.000Z",
+   "turn_status": "interrupted",
+   "attribution": "实际发送。与侧端热数据草稿基本一致，工作区文件后来有增补。",
+   "content": "MiniVectorDB 下一轮 · 连续热数据与精确筛选，冲击亚秒查询\n\n> 使用调查后实现模式和高推理强度。\n\n目标是在当前保留版上实现跨查询复用的有界连续热数据，并接入有误差界的浮点筛选与精确复核。默认 10,000×128、1,000 次混合 K=10 的完整 JSONL 查询目标为每轮低于 1 秒，正确性全过且六项合成本地 E 提高。完成时交付三对完整 A/B 和已验证的采用版本。若未达到亚秒，继续拆分剩余固定成本与扫描成本，给出实际瓶颈及可验证的下一步，按当前结果报告目标完成程度。\n\n## 核对起点和可行性证据\n\nA 为 `305140bc3cf33cddd045e300c05564a8d8e3ae82`，位于\n`<隔离工作树目录>/minivectordb-wal-round3/seekdb-2026-competition-round2`。\n镜像 `minivectordb:wal-read-20261110-r2`，二进制 SHA-256 为\n`7b1d1e4e63995c5c003e1aa571972fb2da5f2906c1eac0aa307139ab3497e4c7`。\n先核对 Git 根、HEAD、工作树及镜像指纹，在独立本地候选中工作。主实现目录仍可能停在旧版本，先定位实际源码再续作。\n\n工作区为 `<工作区>`。读取\n`analysis/hot-scan-20261110/report.md`、`probe.rs`、`verification.json` 和\n`analysis/wal-read-20261110/report.md` 和\n`analysis/github-screen-20261110/report.md`。\n侧端已用相同默认数据做独立 Linux 2 CPU/128 MiB 探针，连续内存原精确核为 5,290.934 ms，浮点筛选后精确复核为 305.569 ms，中位数比值 17.315。1,000 条 TopK ID 和顺序匹配原独立真值，额外 193 次位模式和并列边界匹配。该数值覆盖预载内存扫描和 TopK，完整数据库的 SQL、IPC、准备、输出与资源开销由本轮真实镜像补齐。\n\n## 按下面顺序接入\n\n1. **建立有总预算的热数据。** 从当前可见存储建立按表和数据版本组织的连续 float32 向量、主键、必要过滤字段与原行位置，复用多个查询。正文只为最终命中的 K 条读取。先从约 8 MiB 的缓存总预算尝试，构建时一并核算列宽、字符串、工作区和峰值。数据超预算、事务中或计划不支持时使用现有有界扫描。避免每条查询重新读 WAL、分配每行向量或重建整份缓存。\n2. **处理所有失效边界。** 成功的可见 INSERT/UPDATE/DELETE、提交及 schema/index 变化更新版本或使相关缓存失效，下一次查询从真实当前状态惰性重建。事务内走通用可见视图，回滚后缓存须仍对应正确的已提交状态。重启以原 WAL 恢复。构建与替换避免同时持有多份全表，覆盖多表和低预算情形。\n3. **使用两阶段精确选择。** 先将有限 float32 扩展为 float64，直接计算多累加器平方距离及保守上下界。维护 K 个最小上界，取第 K 小上界 U，只对下界不大于 U 的所有候选运行现有 `SquaredL2` 与主键排序，再按原方式输出欧氏距离。复核报告中的误差证明和 `probe.rs` 的前提、维度限制及端点向外舍入。边界不确定时执行精确回退。首先接入可移植标量多累加器版本，根据实际剖析再做 CPU 特性分派。固定多取若干名的启发式须经过精确性证明才可替代当前筛选。\n4. **先通过真实正确性。** 运行 `cargo test --locked`，最终镜像复跑握手、公开20例、迁移3例、17维位模式、强杀恢复和96MiB限内存场景。增加缓存后的更新/删除/重插、回滚/提交/重启、多表、低预算回退测试。对全部默认查询逐条对照独立真值，精确排序与并列主键一致。用另一个种子、非整数网格的有限 float32、极近距离、大量并列及不同过滤选择率复测。大批并列时允许精确复核集合增大，记录其退化成本。\n5. **以完整镜像决定采用。** 复用 `analysis/wal-read-20261110/run_ab.ps1`、`summarize_ab.py`、`score_ab.py`，新实验副本将 baseline 显式设置为当前 A。A/B 使用相同采集代码与固定输入，三对按 A/B、B/A、A/B 交替。2 CPU、2 GiB、128 PID、禁网无 swap，每次独立空数据目录与 cgroup。外部驱动逐请求往返计量，分别给出过滤与无过滤延迟、首次构建和后续查询耗时，整段 1,000 请求的 T 用同一墙钟。B/M 从数据库启动覆盖装载、索引、缓存构建、预热和写回完成，包含文件页缓存与匿名热数据。写入和查询六项都要测，驱动、生成真值和校验位于数据库 cgroup 外。\n6. **记录各阶段贡献。** 保存当前 A、仅连续热数据、再加精确筛选的阶段版本与短同输入测量，用来确认收益来自哪项。完整三对以最终候选对 A。六项本地 E 继续使用 `analysis/narrow-filter-20261110/ab-02/baseline` 的固定参照，每轮算 E，再分别取三轮中位数。达到亚秒同时检查资源净收益。缓存带来的内存增长完整入账，正式 E 按官方基线另算。\n\n旧 seekdb 的 SIMD 分派、Faiss 的连续扫描及 DuckDB 的选择位置可作方法参考，已核查的版本与许可状态见 `analysis/github-screen-20261110/sources.json` 和报告。Panorama 和无损压缩暂作后续独立 A/B，不扩大本轮实现。存储、执行、事务和索引核心按题面自行实现。外部代码接入逐项核对允许依赖及许可，保留出处。\n\n交付真实完成版本与指纹、三对逐轮六项及 E、两组 Recall、命令、失败与修复复测、缓存预算和失效规则，以及一条实际 SQL 请求和响应。结果和理解分别保留真实来源，供侧端增量整理 conversation。"
+  },
+  {
+   "id": "q07",
+   "role": "user",
+   "thread": "side",
+   "turn_id": "01a1c5db-3e1f-7601-9ddc-487917e67c51",
+   "message_id": "01a1c5db-4823-73d2-bb23-d5a82d46b0ee",
+   "turn_started_utc": "2026-11-10T14:27:22.000Z",
+   "turn_status": "completed",
+   "attribution": "用户实际发送",
+   "content": "继续搜索，github和本地可以迁移"
+  },
+  {
+   "id": "a05",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c5db-5f0a-71e3-a891-f74b4da5f55d",
+   "message_id": "msg_091c0d0a19dfaf4a016af330f0775887d086714fc51fe6547a",
+   "turn_started_utc": "2026-11-10T14:27:30.000Z",
+   "attribution": "主端 Agent 最终回复首段原文摘录。",
+   "content": "保留 `1d7494c` 作为 MiniVectorDB 下一轮起点。三对 A/B 的混合查询分别提速 **87.10%、86.16%、87.18%**，本地 E 中位数从 **0.541116 提高到 0.651425**。正确性和六项资源采集全部通过，**亚秒目标未达成**：B 的三轮完整 JSONL 往返分别为 **1.068、1.136、1.032 秒**。"
+  },
+  {
+   "id": "p06",
+   "role": "user",
+   "thread": "main",
+   "turn_id": "01a1c600-1db7-7642-b2bd-73d3e998f4c4",
+   "message_id": "01a1c600-21ac-7b21-9d37-d77fab8cd374",
+   "turn_started_utc": "2026-11-10T15:07:38.000Z",
+   "turn_status": "failed",
+   "attribution": "实际发送的任务约束，引用了工作区侧端提示。记录不推定提示由用户独立撰写。",
+   "content": "以保留版 1d7494cedff8f1079d212f6c0cd913368e1f8151 为 A，按工作区\nanalysis/agent-evidence/codex-minivectordb-round5-ipc-filter.md\n执行第 5 轮。目标是提高本地 E，并争取 1,000 条完整混合 JSONL 查询三轮均低于 1 秒。\n\n先用同一二进制、同一冻结驱动和相同准备条件，交替复测 LIMIT 0 与完整查询。记录逐请求墙钟、数据库 CPU 和响应字节数。LIMIT 0 用于归因，完整查询时间按原始墙钟报告。直连管道和容器附着分别记录，本地 E 的主 A/B 沿用上一轮口径。\n\n如果过滤开销仍可测，先做有界的等值候选位置复用。把位置表及构建工作区计入现有 8 MiB 总预算，保留事务可见性、提交失效、超预算回退和原精确排序。分别测有过滤、无过滤以及构建成本。\n\n如果 A 已稳定亚秒，或过滤候选的短测收益落在噪声内，就拆测 BEGIN、INSERT、COMMIT。若确认 INSERT 暂存有可重复的开销，单独验证空事务接管首条成功语句的暂存对象，保留原提交持久化和失败语句原子性。\n\n选一个候选做三对交替 A/B。先冻结噪声门槛，再跑正确性、强杀恢复和完整六项 T/B/M。沿用固定本地参照逐轮计算 E。分别报告候选是否采用、亚秒达标轮数及证据路径。没有稳定净收益就保留 1d7494c，并给出实测原因。"
+  },
+  {
+   "id": "a06",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c884-0c17-7740-a146-06eea11557b2",
+   "message_id": "msg_094094beceac43b4016af3d834601487d0a4499876e26fcda3",
+   "turn_started_utc": "2026-11-11T02:50:59.000Z",
+   "attribution": "主端 Agent 最终回复首段原文摘录。",
+   "content": "第 5 轮完成，**保留 A `1d7494cedff8f1079d212f6c0cd913368e1f8151`**。过滤候选 `467930f` 在三对测试中都缩短了查询时间，但成对 E 增益中位数 **+0.001935** 低于预先冻结的 **0.006464**。A 和 B 的正式亚秒达标轮数均为 **0/3**。[完整 T/B/M、版本指纹与复现命令](<工作区>/analysis/ipc-filter-20261110/report.md)"
+  },
+  {
+   "id": "q14",
+   "role": "user",
+   "thread": "admission",
+   "turn_id": "01a1c886-20f5-7510-91de-18d3b4f5f552",
+   "message_id": "01a1c886-2792-7341-9790-536badd357aa",
+   "turn_started_utc": "2026-11-11T02:53:15.000Z",
+   "turn_status": "completed",
+   "attribution": "仅摘录用户在附件后的明确请求。附件临时路径已移除。平台失败为用户报告，官方判题日志未获。",
+   "content": "SQL准入失败，官方给出的信息有限，需要严格按照文档修复一个版本"
+  },
+  {
+   "id": "q15",
+   "role": "user",
+   "thread": "admission",
+   "turn_id": "01a1c886-20f5-7510-91de-18d3b4f5f552",
+   "message_id": "01a1c891-8d13-7f53-8808-1474773096b1",
+   "turn_started_utc": "2026-11-11T02:53:15.000Z",
+   "turn_status": "completed",
+   "attribution": "用户给出的旧失败提交简写。",
+   "content": "387d1b549445ef"
+  },
+  {
+   "id": "q16",
+   "role": "user",
+   "thread": "admission",
+   "turn_id": "01a1c886-20f5-7510-91de-18d3b4f5f552",
+   "message_id": "01a1c895-58f9-77f3-8d75-8ba77a33d24e",
+   "turn_started_utc": "2026-11-11T02:53:15.000Z",
+   "turn_status": "completed",
+   "attribution": "用户要求将修复放在最新优化版。",
+   "content": "找出未通过原因，并且在最新优化的版本上修复即可"
+  },
+  {
+   "id": "a16",
+   "role": "assistant",
+   "thread": "admission",
+   "turn_id": "01a1c886-20f5-7510-91de-18d3b4f5f552",
+   "message_id": "msg_0d3e21a105646ae9016af3df17812087d0b27199b69c7a48a2",
+   "turn_started_utc": "2026-11-11T02:53:15.000Z",
+   "attribution": "Agent 回复摘录，按原段落保留。",
+   "content": "已在最新优化版 `467930f` 上修复，生成本地提交 **`2d3182a6d4d4dfa1f99e1a535a668fc186c611c4`**，尚未推送或提测。\n\n**复现的原因是 `/data` 权限不匹配。** 失败提交 `387d1b5` 以 UID `10001` 启动，挂载 root 所有的 `0700` 目录时收到 `Permission denied`，在发出 `ready` 和执行第一条 SQL 前就退出了。原提测未取得官方容器日志，实际失败点仍待平台确认。 [复现日志](<工作区>/analysis/sql-admission-20261111/before-bind/stderr.log)"
+  },
+  {
+   "id": "q08",
+   "role": "user",
+   "thread": "side",
+   "turn_id": "01a1c8a3-8d01-79d3-b2c9-935bc9f95f5f",
+   "message_id": "01a1c8a3-9662-7482-87ee-8ac36782daed",
+   "turn_started_utc": "2026-11-11T03:25:24.000Z",
+   "turn_status": "completed",
+   "attribution": "用户实际发送",
+   "content": "现在写第6轮提示词，先把[实现并验证 MiniVectorDB](codex://threads/01a1c46c-3ecd-7191-b859-6b69e2cd62a4)的上一轮对话只整理到记忆或者知识库，评价上一轮是否有明显收益，如果没有列出5-6个可以优化的方向，然后根据前面收集的资料选出一个可以持续优化的方向给第6轮提示词"
+  },
+  {
+   "id": "p07",
+   "role": "user",
+   "thread": "main",
+   "turn_id": "01a1c8ab-a9e3-7171-bfe9-55214a036ed8",
+   "message_id": "01a1c8ab-ad8d-78a0-aa65-709276265e5a",
+   "turn_started_utc": "2026-11-11T03:34:15.000Z",
+   "turn_status": "completed",
+   "attribution": "实际发送的任务约束，引用了工作区侧端提示。记录不推定提示由用户独立撰写。",
+   "content": "以 1d7494c 为性能 A，按 analysis/agent-evidence/codex-minivectordb-round6-write-staging.md 执行第 6 轮。先用同一镜像和固定输入拆测 BEGIN、INSERT、COMMIT，再单独验证空显式事务接管首条成功语句的完整暂存对象。覆盖失败语句原子性、已有待提交变更、读己之写、回滚、重启和强杀恢复。\n\n短测显示可复现收益后，再做三对同口径 A/B，逐轮计算六项 T/B/M 和本地 E。若综合收益未超过本轮 A/A 波动，保留 A，并交付阶段耗时、候选结果和剩余瓶颈。"
+  },
+  {
+   "id": "a07",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c8ab-a9e3-7171-bfe9-55214a036ed8",
+   "message_id": "msg_091c0d0a19dfaf4a016af3e634120487d0a0aeec451ada53ca",
+   "turn_started_utc": "2026-11-11T03:34:15.000Z",
+   "attribution": "主端 Agent 最终回复首段原文摘录。",
+   "content": "第 6 轮结束，**保留 `1d7494c`**。候选 `d3cee19` 接管空显式事务的首条成功语句暂存，三对短测的数据库 CPU 中位配对下降 **13.77%**。正式写入 T 中位配对下降 **6.26%**，但成对本地 E 增益中位数 **+0.004413** 低于冻结的 A/A 门槛 **0.008570**。[完整六项 T/B/M、版本指纹和复现命令](<工作区>/analysis/write-stage-20261111/report.md)"
+  },
+  {
+   "id": "q09",
+   "role": "user",
+   "thread": "side",
+   "turn_id": "01a1c8b9-022f-7901-b098-bade7eb98eb5",
+   "message_id": "01a1c8b9-0548-7e62-b888-fcb5fba1c508",
+   "turn_started_utc": "2026-11-11T03:48:50.000Z",
+   "turn_status": "completed",
+   "attribution": "用户实际发送",
+   "content": "是否利用了迁移报告"
+  },
+  {
+   "id": "a21",
+   "role": "assistant",
+   "thread": "side",
+   "turn_id": "01a1c8b9-022f-7901-b098-bade7eb98eb5",
+   "message_id": "msg_0a3aa473b081b8f7016af3e5a9884087d0a6bc378b1d68b2bd",
+   "turn_started_utc": "2026-11-11T03:48:50.000Z",
+   "attribution": "实际 Agent 进度或回复摘录。",
+   "content": "有。第 6 轮的主方案直接来自[迁移报告](<工作区>/analysis/migration-followup-20261110/report.md)：**让空显式事务接管首条成功语句的暂存对象**，省掉 `Changes::merge` 对同一批记录的解码、重新编码和临时索引更新。\n\n我也用报告里的 **每批 62,700 字节逻辑暂存量** 来界定实验。这个数字说明有多少数据被重复处理，实际磁盘 I/O 和 E 能省多少，要靠 `BEGIN`、`INSERT`、`COMMIT` 拆测及 A/B 验证。这些要求已写进[第 6 轮提示词](<工作区>/analysis/agent-evidence/codex-minivectordb-round6-write-staging.md)。报告里的有界内存暂存是这条路线的后续选项，无损压缩和索引合并列为独立候选。"
+  },
+  {
+   "id": "p08",
+   "role": "user",
+   "thread": "main",
+   "turn_id": "01a1c8c1-8f75-7890-af7c-fb02729a4f68",
+   "message_id": "01a1c8c3-42d0-7f43-afab-e261393f116b",
+   "turn_started_utc": "2026-11-11T03:58:10.000Z",
+   "turn_status": "completed",
+   "attribution": "实际发送的任务约束，引用了工作区侧端提示。记录不推定提示由用户独立撰写。",
+   "content": "以 1d7494c 为性能 A，按 analysis/agent-evidence/codex-minivectordb-round7-commit-path.md 执行第 7 轮。\n\n先用同一镜像和固定输入，分别测量 WAL 追加、同步等待、索引回放和外部 COMMIT 往返。根据耗时只选一项改动，保留每个非空事务的持久化确认顺序，并验证强杀恢复与旧 WAL 兼容。\n\n短测收益超过 A/A 波动后，再做三对同口径 A/B，逐轮计算六项 T/B/M 和本地 E。若综合收益未超过预先冻结的门槛，保留 A，交付阶段耗时、候选结果和剩余瓶颈。"
+  },
+  {
+   "id": "a08",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c8c1-8f75-7890-af7c-fb02729a4f68",
+   "message_id": "msg_091c0d0a19dfaf4a016af3ebb38af087d0a2bd79c1c2a39ce0",
+   "turn_started_utc": "2026-11-11T03:58:10.000Z",
+   "attribution": "主端 Agent 最终回复首段原文摘录。",
+   "content": "**第 7 轮保留 `1d7494c`。** 候选 `7c45ac8` 只将 Linux 非空事务的 WAL 同步改为 `sync_data()`。三对短测中，COMMIT 累计墙钟均略升，中位升幅 **2.13%**，处于冻结的 **4.00%** A/A 波动内。写入 T 中位升 1.15%，DB CPU 升 0.53%，物理 I/O 持平，峰值内存升 5.09%。短测未达门槛，本轮未进入正式三对 A/B，也未计算本地 E。 [逐轮短测](<工作区>/analysis/commit-path-20261111/short-score.json)"
+  },
+  {
+   "id": "p09",
+   "role": "user",
+   "thread": "main",
+   "turn_id": "01a1c8d8-efa7-7f60-89ee-49c8da82a128",
+   "message_id": "01a1c8d8-f6d4-7d83-b8e7-5ad249d63dd4",
+   "turn_started_utc": "2026-11-11T04:23:42.000Z",
+   "turn_status": "completed",
+   "attribution": "实际发送的任务约束，引用了工作区侧端提示。记录不推定提示由用户独立撰写。",
+   "content": "以 1d7494c 为性能 A，按 <工作区>/analysis/agent-evidence/codex-minivectordb-round8-lossless-wal.md 执行第 8 轮。\n\n先复核迁移报告中的无损编码探针，比较网格、一般 float32 和随机位模式的压缩率及编解码成本。若具备可行性，基于 A 在独立工作树实现按向量自适应的无损存储；对不安全或不划算的数据回退原始格式，不依赖固定维度、数据分布或评测输入。\n\n保持事务持久化、精确查询和恢复语义，验证旧 WAL 读取、新旧记录混合重启、强杀恢复及特殊浮点位模式。基础正确性通过后，按预先冻结的 A/A 波动门槛完成三对同口径端到端 A/B，逐轮记录六项 T/B/M 和本地 E，并补充非网格数据对照。\n\n根据实际综合收益和正确性决定保留版本；如果方案不可行或收益未超过波动，保留 A，记录原因、原始证据和下一步方向。"
+  },
+  {
+   "id": "a09",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c8d8-efa7-7f60-89ee-49c8da82a128",
+   "message_id": "msg_091c0d0a19dfaf4a016af3f1bfa99c87d0bd4a5b74f0831aec",
+   "turn_started_utc": "2026-11-11T04:23:42.000Z",
+   "attribution": "主端 Agent 最终回复首段原文摘录。",
+   "content": "**第 8 轮采用 `a3fe0f7` 作为本地保留版。** 三对端到端 A/B 的本地 E 中位数从 **0.650986** 提升至 **0.684829**，成对增益中位数 **0.033129**，超过预先冻结的 A/A 门槛 **0.016099**。12 次资源采集完整。 [逐轮六项与 E](<工作区>/analysis/lossless-wal-20261111/report.md) · [采用审计](<工作区>/analysis/lossless-wal-20261111/adoption.json)"
+  },
+  {
+   "id": "p10",
+   "role": "user",
+   "thread": "main",
+   "turn_id": "01a1c8fd-f642-76c2-8e12-b51ded193e75",
+   "message_id": "01a1c8fd-fd2e-7dc3-ae74-67653afbe526",
+   "turn_started_utc": "2026-11-11T05:04:09.000Z",
+   "turn_status": "completed",
+   "attribution": "实际发送的任务约束，引用了工作区侧端提示。记录不推定提示由用户独立撰写。",
+   "content": "以 a3fe0f7 为性能 A，按 <工作区>/analysis/agent-evidence/codex-minivectordb-round9-compact-hot-cache.md 执行第 9 轮。\n\n先复核热快照的构建、查询和内存开销，以及侧端的无损 16 位表示探针。若具备可行性，在独立工作树实现自适应紧凑热快照：只有能逐位还原原 float32 的向量才使用紧凑表示，其他数据保留原样回退。比较构建、筛选和精确复核成本，保持过滤、并列排序、投影和事务语义。\n\n保持第 8 轮 WAL 格式与持久化语义，覆盖混合格式重启、强杀恢复、低内存、不同维度和非网格输入。先测量并冻结本轮 A/A 波动，再完成三对同口径端到端 A/B，逐轮记录写入和查询的 T/B/M、亚秒轮数及本地 E。\n\n注意旧 run_ab.ps1 和 score_round8.py 的基线仍固定为 1d7494c：请独立适配包装，核对 A/A 两臂及 A/B 的提交、镜像和二进制指纹，确保本轮基线确为 a3fe0f7。根据正确性、完整六项和预先冻结的噪声门槛决定保留版本；收益不明确时保留 A，并记录证据和下一方向。"
+  },
+  {
+   "id": "a10",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c8fd-f642-76c2-8e12-b51ded193e75",
+   "message_id": "msg_091c0d0a19dfaf4a016af3fb15e1c487d09ee04304becce7b8",
+   "turn_started_utc": "2026-11-11T05:04:09.000Z",
+   "attribution": "主端 Agent 最终回复首段原文摘录。",
+   "content": "**第 9 轮保留 `a3fe0f7`。** 候选 `70211e6` 将默认热快照的向量载荷从 **5.12 MB 降至 2.56 MB**，查询峰值内存三对均下降，成对中位降幅 **23.0%**。本地 E 中位数从 **0.684744** 升至 **0.693186**，但成对增益中位数 **0.008442** 低于六对 A/A 预先冻结的 **0.019659** 门槛。12 次资源采集完整，写入和查询物理 I/O 均持平，两版亚秒均为 **0/3**。 [逐轮六项、E 与复现命令](<工作区>/analysis/compact-hot-20261111/report.md) · [采用审计](<工作区>/analysis/compact-hot-20261111/adoption.json)"
+  },
+  {
+   "id": "p11",
+   "role": "user",
+   "thread": "main",
+   "turn_id": "01a1c916-fcb9-77d0-9982-cfd814cb6b74",
+   "message_id": "01a1c917-0416-7d33-8ca1-2baed54dde24",
+   "turn_started_utc": "2026-11-11T05:31:29.000Z",
+   "turn_status": "completed",
+   "attribution": "实际发送的任务约束，引用了工作区侧端提示。记录不推定提示由用户独立撰写。",
+   "content": "以 a3fe0f7 为当前保留版 A，按 <工作区>/analysis/agent-evidence/codex-minivectordb-round10-compact-retest.md 执行第 10 轮，独立复核第 9 轮紧凑热快照候选 70211e6。\n\n先核对 A/B 的提交、镜像、二进制及输入指纹，预先登记运行顺序、异常处理、资源护栏和采用条件。使用全新样本完成九对均衡交叉 A/B，逐轮记录写入和查询的 T/B/M、本地 E、查询 CPU 及亚秒轮数；保留全部慢值，不改变第 9 轮的原始结果和保留决定。\n\n本轮主要检查候选是否在至少 8/9 对中取得正的成对 E 增益，并结合预先登记的资源护栏和正确性作出判断。统计结论须说明样本和环境限制，不代表正式平台成绩。\n\n同条件比较 A/B 在启用与禁用 F16C 时的查询表现；若能力不足造成可复现的明显退化，在独立候选中实现运行时回退，并用新的独立样本重新验收。覆盖非网格与混合输入、精确 TopK、事务、混合 WAL 恢复、低内存和强杀恢复。\n\n满足预登记条件且正确性通过时，保留收益可复现的版本；否则继续保留 A，并记录完整证据、不确定性和下一方向。"
+  },
+  {
+   "id": "a20",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c916-fcb9-77d0-9982-cfd814cb6b74",
+   "message_id": "msg_091c0d0a19dfaf4a016af4028c223c87d0ba3be81e7dee67f4",
+   "turn_started_utc": "2026-11-11T05:31:29.000Z",
+   "attribution": "实际 Agent 进度或回复摘录。",
+   "content": "C 通过了仅禁用 F16C 的对照。AVX 和 F16C 同时禁用时，第二对 C 的查询耗时和 CPU 偏高，拉过了预登记护栏。按本轮规则继续保留 A。我会保留这次慢值，并核对它在查询序列中的分布。"
+  },
+  {
+   "id": "a11",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c916-fcb9-77d0-9982-cfd814cb6b74",
+   "message_id": "msg_091c0d0a19dfaf4a016af40335b7f087d0858fad19ede40967",
+   "turn_started_utc": "2026-11-11T05:31:29.000Z",
+   "attribution": "主端 Agent 最终回复首段原文摘录。",
+   "content": "**第 10 轮继续保留 `a3fe0f7`。** 原候选 B 和回退候选 C 都通过了九对主性能判定。C 修复了仅禁用 F16C 时的明显退化，但在同时禁用 AVX 和 F16C 的对照中，查询墙钟和 CPU 都超过了预登记护栏。第 9 轮结果及保留决定维持原样。 [采用审计](<工作区>/analysis/compact-retest-20261111/adoption.json)"
+  },
+  {
+   "id": "q10",
+   "role": "user",
+   "thread": "side",
+   "turn_id": "01a1c931-3fa7-7b11-8fd0-4728da432790",
+   "message_id": "01a1c931-4317-76d3-9e3c-2a97e295c4ce",
+   "turn_started_utc": "2026-11-11T06:00:10.000Z",
+   "turn_status": "interrupted",
+   "attribution": "用户实际发送",
+   "content": "记录第10轮，给出第11轮提示词。上一轮是否有收益"
+  },
+  {
+   "id": "p12",
+   "role": "user",
+   "thread": "main",
+   "turn_id": "01a1c936-5173-7630-90aa-f9e34ef0f91f",
+   "message_id": "01a1c936-58d9-79c1-9dba-a6f5b112cad8",
+   "turn_started_utc": "2026-11-11T06:05:42.000Z",
+   "turn_status": "completed",
+   "attribution": "实际发送的任务约束，引用了工作区侧端提示。记录不推定提示由用户独立撰写。",
+   "content": "以 a3fe0f7 为当前保留版 A，按 <工作区>/analysis/agent-evidence/codex-minivectordb-round11-scalar-fallback.md 执行第 11 轮，继续验证第 10 轮候选 f4742c3。\n\n先在相同输入和能力屏蔽条件下，配对复测正常硬件、仅禁用 F16C、同时禁用 AVX/F16C 三种情况。记录查询墙钟、数据库 CPU、逐百条延迟、资源及可取得的宿主状态，判断纯标量慢值是否可复现。\n\n如果发现可复现的路径开销，基于 f4742c3 在独立工作树修复。优先检查纯 float32 热快照能否直接连续扫描，同时保留紧凑和混合向量路径。如果现有候选复测已通过回退检查，直接结合已有九对性能结果和新证据评估采用。\n\n对最终候选验证精确 TopK、过滤与并列、事务、混合 WAL 恢复、低内存和强杀恢复。修改后的二进制使用独立端到端 A/B 采集六项 T/B/M 和本地 E。根据正确性、净收益及硬件回退证据决定保留版本，并记录全部慢值和复现命令。"
+  },
+  {
+   "id": "a12",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c936-5173-7630-90aa-f9e34ef0f91f",
+   "message_id": "msg_091c0d0a19dfaf4a016af407da0ee887d08c4ecddb84ce1f1c",
+   "turn_started_utc": "2026-11-11T06:05:42.000Z",
+   "attribution": "主端 Agent 最终回复首段原文摘录。",
+   "content": "**第 11 轮采用 `f4742c3` 作为本地保留版。** C 的源码和正式二进制沿用第 10 轮。新增 12 对能力诊断全部采集完整，三种配置均通过预登记护栏。 [采用审计](<工作区>/analysis/scalar-fallback-20261111/adoption.json)"
+  },
+  {
+   "id": "q11",
+   "role": "user",
+   "thread": "side",
+   "turn_id": "01a1c949-6a84-7d51-a116-053eb3b90228",
+   "message_id": "01a1c949-6e12-7982-aac5-0bcea5f3577b",
+   "turn_started_utc": "2026-11-11T06:26:34.000Z",
+   "turn_status": "interrupted",
+   "attribution": "用户实际发送",
+   "content": "记录第11轮，给出第12轮提示词。上一轮是否有收益？"
+  },
+  {
+   "id": "q12",
+   "role": "user",
+   "thread": "side",
+   "turn_id": "01a1c94d-a600-7a60-8247-46fac55ded98",
+   "message_id": "01a1c94d-a933-7773-8ce1-64975427b3d0",
+   "turn_started_utc": "2026-11-11T06:31:11.000Z",
+   "turn_status": "completed",
+   "attribution": "用户实际发送",
+   "content": "为什么仍为0/9"
+  },
+  {
+   "id": "a15",
+   "role": "assistant",
+   "thread": "side",
+   "turn_id": "01a1c94d-a600-7a60-8247-46fac55ded98",
+   "message_id": "msg_01d9cec9c044d938016af40bce174487d085e3bfb9d9ed2f4e",
+   "turn_started_utc": "2026-11-11T06:31:11.000Z",
+   "attribution": "Agent 回复摘录，按原段落保留。",
+   "content": "**0/9 是因为九轮里最快的一轮也用了 1.018 秒。** 每轮计时覆盖 1,000 条逐请求等待响应的 JSONL 查询。`f4742c3` 的九轮耗时为 **1.018–1.342 秒**，中位数 **1.114 秒**。查询墙钟虽然成对中位下降了 **4.56%**，中位耗时仍需再降约 **114 毫秒**才能过线。[九对原始数据](<工作区>/analysis/compact-retest-20261111/ac-score.csv)\n\n**E 提高主要来自查询峰值内存下降 23.88%。** 墙钟还受请求往返和调度影响。较早的同机对照中，1,000 条 `LIMIT 0` 请求用容器附着驱动约耗时 **825 毫秒**，直连约 **93 毫秒**。这说明只优化距离计算，能省下的端到端时间有限。[E 分项贡献](<工作区>/analysis/compact-retest-20261111/contributions.json) · [往返耗时对照](<工作区>/analysis/ipc-filter-20261110/report.md:16)"
+  },
+  {
+   "id": "p13",
+   "role": "user",
+   "thread": "main",
+   "turn_id": "01a1c95c-b680-7521-8fa0-3860024ed8ee",
+   "message_id": "01a1c95c-be85-7500-9ed3-661d9b16f791",
+   "turn_started_utc": "2026-11-11T06:47:38.000Z",
+   "turn_status": "interrupted",
+   "attribution": "实际发送的任务约束，引用了工作区侧端提示。记录不推定提示由用户独立撰写。",
+   "content": "以第 11 轮保留版 f4742c3 为 A，按 <工作区>/analysis/agent-evidence/codex-minivectordb-round12-f32-screening.md 执行第 12 轮。\n\n先分别测量热快照首次构建、稳态距离筛选、精确复核及完整查询往返。若筛选仍是主要可优化开销，先在纯 binary16 热快照上验证 AVX/F16C 单精度 SIMD 筛选，并为实际计算路径推导保守误差区间。区间重叠、并列或数值超界时走现有精确复核或回退路径，保证 TopK 结果和顺序一致。\n\n候选通过独立真值和短测后，再用冻结驱动做成对端到端 A/B，逐轮记录六项 T/B/M、本地 E、查询 CPU、精确复核数量及亚秒轮数。覆盖极值、近并列、混合快照、硬件回退、事务和恢复。只有在正确性通过且端到端收益可复现时才采用候选，否则保留 f4742c3，并记录实测结果。"
+  },
+  {
+   "id": "a13",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c970-f94e-7ef2-ae13-4f2e12aece49",
+   "message_id": "msg_091c0d0a19dfaf4a016af419beea3487d0a02d368bc0e10130",
+   "turn_started_utc": "2026-11-11T07:09:46.000Z",
+   "attribution": "主端 Agent 最终回复首段原文摘录。",
+   "content": "第 12 轮完成，继续保留 **`f4742c3`**，不采用候选 `27a8b66`。"
+  },
+  {
+   "id": "q13",
+   "role": "user",
+   "thread": "side",
+   "turn_id": "01a1c985-06a8-7991-acd8-5e48444575cd",
+   "message_id": "01a1c985-0ded-7950-b3ad-5daddbab796c",
+   "turn_started_utc": "2026-11-11T07:31:40.000Z",
+   "turn_status": "completed",
+   "attribution": "用户实际发送",
+   "content": "记录第12轮，给出13轮提示词。上一轮收益，当前e值，当前方向进度，如果没有明显收益分析原因。另外这个版本sql准入优化是否完成。"
+  },
+  {
+   "id": "p14",
+   "role": "user",
+   "thread": "main",
+   "turn_id": "01a1c990-7c63-7c81-8135-297fa2e489dc",
+   "message_id": "01a1c990-8070-7082-9b53-0f6f4158edda",
+   "turn_started_utc": "2026-11-11T07:44:11.000Z",
+   "turn_status": "failed",
+   "attribution": "实际发送的任务约束，引用了工作区侧端提示。记录不推定提示由用户独立撰写。",
+   "content": "以当前保留版 f4742c3 为起点，按 <工作区>/analysis/agent-evidence/codex-minivectordb-round13-sql-admission.md 执行第 13 轮。\n\n先对照当前题包整理 SQL 与功能准入覆盖表，核实已有通过记录和未验证项。基于 f4742c3 建立独立修复工作树。\n\n先用当前真实镜像复现 root 拥有的 0700 /data 挂载问题，再迁移历史 2d3182a 的必要包装修复，验证 ready、SQL、确认提交、强杀和重启。随后补齐 19 行×7 MiB 宽文本的字符串排序、并列和投影测试；若在 96 MiB 下失败，定位归并键及复制的内存成本，完成有界修复。\n\n通过真实镜像公开包、迁移包、独立真值、事务、混合 WAL、低内存及强杀恢复回归。使用最终包装串行采集至少三轮完整六项 T/B/M，逐轮计算固定本地参考下的 E，并记录亚秒轮数。\n\n交付最终源码、镜像及二进制指纹、准入覆盖表、失败和复测证据、最新六项与 E。正式平台准入按实际回执填写，更新项目跟踪和共享记忆。"
+  },
+  {
+   "id": "a14",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c9af-c26b-7d42-b3ff-185cfd673ebd",
+   "message_id": "msg_091c0d0a19dfaf4a016af4271db26487d097300c7e10c2e9fd",
+   "turn_started_utc": "2026-11-11T08:18:21.000Z",
+   "attribution": "主端 Agent 最终回复首段原文摘录。",
+   "content": "第 13 轮完成。本地保留版更新为 **`826a159`**，镜像为 `minivectordb:sql-admission-20261111-r1`。从源码归档重建得到相同的 Linux amd64 二进制 SHA-256 `bd0e46306ab91192aaa6b918e843b7b733a2612c8ddca4902c717c99fc2ed272`。 [源码](<工作区>/analysis/sql-admission-round13-20261111/final-source.zip) · [镜像](<工作区>/analysis/sql-admission-round13-20261111/final-image.tar) · [完整指纹](<工作区>/analysis/sql-admission-round13-20261111/version-final.json)"
+  },
+  {
+   "id": "p15",
+   "role": "user",
+   "thread": "main",
+   "turn_id": "01a1c9d8-22d9-7e82-8d14-8276e521c014",
+   "message_id": "01a1c9d8-26db-7543-8f13-51609f671aa3",
+   "turn_started_utc": "2026-11-11T09:02:27.000Z",
+   "turn_status": "failed",
+   "attribution": "实际发送的任务约束，引用了工作区侧端提示。记录不推定提示由用户独立撰写。",
+   "content": "开始 MiniVectorDB 第 14 轮。以第 13 轮保留版 826a159 为 A，执行\n<工作区>/analysis/agent-evidence/codex-minivectordb-round14-derived-index.md\n\n先用真实镜像验证建向量索引时第二张主键位置表带来的实际设备写入、\ncgroup 内存和冷路径开销。确认有可测收益后，在独立工作树试用同一个\n可从原 WAL 重建的主键索引保存行位置和向量位置，保持 WAL 格式、\n提交顺序、事务可见性和冷路径覆盖查询语义。\n\n复跑第 13 轮的 root:0700 私有 /data、96 MiB 宽文本排序、旧 WAL\n双向重启和强杀恢复，再用独立真值验证精确 TopK。沿用冻结评测驱动，\n先测 A/A 波动，再跑至少三对 A/B。报告每对写入和查询的 T/B/M、\n本地 E、亚秒次数和冷路径耗时。按预先写下的采用条件作决定。\n若收益无法复现，保留 826a159，并归档原始数据和失败原因。"
+  },
+  {
+   "id": "a22",
+   "role": "assistant",
+   "thread": "main",
+   "turn_id": "01a1c9d8-22d9-7e82-8d14-8276e521c014",
+   "message_id": "msg_091c0d0a19dfaf4a016af4316b43dc87d0ba52111d8cabd9bb",
+   "turn_started_utc": "2026-11-11T09:02:27.000Z",
+   "attribution": "实际 Agent 进度或回复摘录。",
+   "content": "候选在三次预检中都省去 393,216 字节设备写入，建索引往返从约 91–94 ms 降至 4.7–4.9 ms。默认冷覆盖和非覆盖查询均通过真值，延迟在预登记护栏内。准入回归正在运行，随后还要测建索引前删除 99% 行的场景，检查扫描墓碑的代价。"
+  }
+ ],
+ "experiments": [
+  {
+   "id": "E01",
+   "title": "从正式规则推导 E 上界，再用本地代理校验",
+   "dimension": "问题理解与自主拆解",
+   "prompt_digest": "核查官方六项基线是否已经公布。按新题包的协议、默认负载和计分公式估算，给出有假设的本地上界，并据此排序写入、查询、I/O 和内存方向。",
+   "context": "固定基线 b、候选 x，T 用 ms、B/M 用 MiB。顺序为写 T/B/M、查 T/B/M，权重为 1/5、1/15、1/15、2/5、2/15、2/15。E = Σ w_i(b_i+1)/(b_i+x_i+2)，零开销数学包络为 Σ w_i(b_i+1)/(b_i+2)。",
+   "execution": "读取公开规则和配套协议，在相同本机条件下运行二进制追加、WAL 双写和文本代理；其指标用于敏感度分析。后续完整数据库 A/B 固定参考第 1 轮 A 的六项中位数。",
+   "output": "代理的零开销数学包络为 0.958130510 / 0.974116879 / 0.977746475。后续实际数据库固定本地参考的包络为 0.961142891。未取得官方六项基线。性能赛事得分由排名决定，查询耗时只占 E 的 40%，降低其他五项仍会改变排序。",
+   "decision": "先建立真实 JSONL 基线和正确性，再比较六项的配对结果。代理模型只解释资源成本方向。",
+   "sent_prompt_evidence": [
     {
-      "thread": "赛题上线测量",
-      "thread_id": "01a1c0fd-1603-7033-9431-98fb5b23a513",
-      "turn_id": "01a1c102-9e2f-7a03-b546-8de4000253e6",
-      "message_id": "01a1c102-a21b-7a92-aa5b-4d4ffaccf9f6",
-      "turn_started_at": "2026-11-09T23:52:16+08:00",
-      "turn_status": "interrupted",
-      "role": "user",
-      "attribution": "participant_request",
-      "content": "逆向目前公开的测试题包，估算一下性能基线和综合指标 E 的理论上限\n"
+     "id": "q01",
+     "pointer": "/conversations/0/content",
+     "excerpt": "能查到官方的基线值吗？帮我算一下综合指标 E 的理论上限是多少。"
     },
     {
-      "thread": "赛题上线测量",
-      "thread_id": "01a1c0fd-1603-7033-9431-98fb5b23a513",
-      "turn_id": "01a1c443-7d90-7af3-88f9-1b6675864c4b",
-      "message_id": "01a1c446-06f1-7291-824c-ef010a4bac2a",
-      "turn_started_at": "2026-11-10T15:01:59+08:00",
-      "turn_status": "completed",
-      "role": "user",
-      "attribution": "participant_request",
-      "content": "结合仓库更新分析\n"
+     "id": "q02",
+     "pointer": "/conversations/1/content",
+     "excerpt": "逆向目前公开的测试题包，估算一下性能基线和综合指标 E 的理论上限"
     },
     {
-      "thread": "赛题上线测量",
-      "thread_id": "01a1c0fd-1603-7033-9431-98fb5b23a513",
-      "turn_id": "01a1c443-7d90-7af3-88f9-1b6675864c4b",
-      "message_id": "msg_02da6e80bd0d5c09016af2c361576887d08fd22a271088b278",
-      "turn_started_at": "2026-11-10T15:01:59+08:00",
-      "turn_status": "completed",
-      "role": "assistant",
-      "attribution": "agent_analysis",
-      "content": "结合最新仓库更新，**可以给出基于本地测量的情景估算：三种代理基线对应的 E 理论上界约为 0.958～0.978；目前仍无法确定官方上界。**\n\n最新提交 [`f4d4e266`](https://github.com/oceanbase/seekdb/commit/f4d4e26653af823a7601668802f80e374ad6643c) 新增了 JSONL 通信协议和检查工具。20 个公开用例、95 条 SQL 均未变化，也没有新增性能基线。新增配置是 **2 CPU、2 GiB 内存、启动超时 120 秒、单请求超时 60 秒**；这些是资源限制和超时阈值，不能当作实测基线。Python 示例的 SQL 执行函数始终返回 `NOT_IMPLEMENTED`，也不能用它测数据库基线。[配置与工具说明](https://github.com/oceanbase/seekdb/blob/f4d4e26653af823a7601668802f80e374ad6643c/protocol_check/README.md)\n\n我按题面默认的 **1 万条、128 维、1000 次 TopK** 构造了代理负载，完成 27 轮本地测量。下面三种情景额外假设：过滤选择率为 10%、每条附带 64 字节文本。表中是各指标三轮中位数，耗时单位为秒，I/O 和内存单位为 MiB：\n\n| 代理参考实现假设 | 写入：耗时 / I/O / 内存 | 查询：耗时 / I/O / 内存 | E 的零开销上界 |\n|---|---|---|---:|\n| 二进制追加 | 0.138 / 6.074 / 8.184 | 0.403 / 6.074 / 14.383 | **0.958131** |\n| WAL＋数据双写 | 0.291 / 12.148 / 14.066 | 0.423 / 12.148 / 20.320 | **0.974117** |\n| 文本追加 | 0.236 / 14.656 / 17.664 | 0.533 / 14.656 / 23.313 | **0.977746** |\n\n这些值来自本机单核 Linux 容器中的记录写入、精确扫描和 TopK 测量。代理尚未覆盖完整 SQL、事务恢复和正式驱动通信，因此**它们是三种假设的计算结果，不能视为官方上界的置信区间**。\n\n新协议对估算最重要的影响是：驱动明确采用“发一个请求、等一个响应”，正式耗时还包含 JSON、SQL 解析、IPC 和逐请求 flush。此前代理耗时不能直接当作完整端到端耗时。[最新通信协议](https://github.com/oceanbase/seekdb/blob/f4d4e26653af823a7601668802f80e374ad6643c/STDIO_PROTOCOL.md)\n\n不过，**若仅补充这些时间成本，保持上述 I/O、内存基线不变，上界变化很小**。例如二进制情景中，即使把两个基线耗时无限增大，上界也只从 `0.958131` 趋近 `0.960545`。影响上界估算更大的未知量，是参考实现的落盘方式、缓存和实际峰值内存。\n\n对优化目标更实用的判断仍然是：\n\n- 其余五项保持基线，仅把查询耗时降到零：**E 小于 0.7**。\n- 四项 I/O、内存保持基线，把写入和查询耗时都降到零：**E 小于 0.8**。\n\n完整假设、计算和原始测量已保存在[更新分析报告](C:/Users/faro/Documents/ChatGPT/MinivectorDB/analysis/perf-estimate-20261109/repository-update-20261110.md)及[实验报告](C:/Users/faro/Documents/ChatGPT/MinivectorDB/analysis/perf-estimate-20261109/report.md)中。",
-      "turn_completed_at": "2026-11-10T15:10:47+08:00"
+     "id": "q03",
+     "pointer": "/conversations/2/content",
+     "excerpt": "结合仓库更新分析"
     },
     {
-      "thread": "评估迁移旧 SeekDB 赛题文件",
-      "thread_id": "01a1c100-1633-77e1-b02f-ab7108e3ced2",
-      "turn_id": "01a1c447-52ab-78c2-9a56-c0bbf7f1d72c",
-      "message_id": "01a1c447-55e2-7c02-9c96-a5260f9d12af",
-      "turn_started_at": "2026-11-10T15:06:11+08:00",
-      "turn_status": "completed",
-      "role": "user",
-      "attribution": "participant_request",
-      "content": "把有价值的旧测试和工具适配到 MiniVectorDB 新赛题，再清理不需要的旧构建和测试文件，继续释放磁盘空间。\n"
-    },
-    {
-      "thread": "赛题上线测量",
-      "thread_id": "01a1c0fd-1603-7033-9431-98fb5b23a513",
-      "turn_id": "01a1c455-2ca3-7d53-b35c-ee97a695847e",
-      "message_id": "01a1c455-2fad-7f42-a784-243d9a9d552c",
-      "turn_started_at": "2026-11-10T15:21:18+08:00",
-      "turn_status": "completed",
-      "role": "user",
-      "attribution": "participant_request",
-      "content": "结合测算结果和最新题包，分析 MiniVectorDB 要拿性能满分，写入、查询、I/O 和内存应该优先优化哪些地方。\n"
-    },
-    {
-      "thread": "赛题上线测量",
-      "thread_id": "01a1c0fd-1603-7033-9431-98fb5b23a513",
-      "turn_id": "01a1c46a-220f-7cb3-a714-285d4652ec28",
-      "message_id": "01a1c46a-24f4-7731-9685-9ac631d14855",
-      "turn_started_at": "2026-11-10T15:44:12+08:00",
-      "turn_status": "completed",
-      "role": "user",
-      "attribution": "participant_request",
-      "content": "我会用主端完成赛题跑通，侧端完成conversation写入和提示测生成，只需要给我第一段提示测。结合上一个赛题迁移的方法和文件内容，重新生成\n"
-    },
-    {
-      "thread": "实现并验证 MiniVectorDB",
-      "thread_id": "01a1c46c-3ecd-7191-b859-6b69e2cd62a4",
-      "turn_id": "01a1c46c-46f5-77a0-8946-11deda0fbe31",
-      "message_id": "01a1c46c-50bd-7aa2-9fc0-339344e9acda",
-      "turn_started_at": "2026-11-10T15:46:32+08:00",
-      "turn_status": "failed",
-      "role": "user",
-      "attribution": "agent_prompt_reposted_by_participant",
-      "content": "```yaml\n你负责在主端实现并跑通 MiniVectorDB；侧端负责生成后续提示词和整理 conversation.json。本轮请推进真实数据库实现与验证，不要停留在方案说明。\n\n工作区：\nC:/Users/faro/Documents/ChatGPT/MinivectorDB\n\n实现仓库：\nC:/Users/faro/Documents/ChatGPT/MinivectorDB/seekdb-2026-competition-round2\n\n先读取项目 AGENTS.md、全局项目记忆，以及以下材料：\n- C:/Users/faro/Documents/ChatGPT/MinivectorDB/MiniVectorDB-实现方案分析.md\n- C:/Users/faro/Documents/ChatGPT/MinivectorDB/2026-11-10_旧赛题磁盘审计/审计与迁移建议.md\n- C:/Users/faro/Documents/ChatGPT/MinivectorDB/2026-11-10_旧赛题磁盘审计/本次适配与清理.md\n- C:/Users/faro/Documents/ChatGPT/MinivectorDB/seekdb-2026-competition-round2/STDIO_PROTOCOL.md\n- C:/Users/faro/Documents/ChatGPT/MinivectorDB/seekdb-2026-competition-round2/tools/minivectordb-legacy-testkit/README.md\n- C:/Users/faro/Documents/ChatGPT/MinivectorDB/analysis/performance-priorities-20261110.md\n\n核对官方题包更新。旧分析中“通信协议尚未公布”等历史描述，以当前 STDIO_PROTOCOL.md 和实际驱动为准。\n\n本轮目标：完成一版可构建、可启动、可持久化、可以通过真实驱动执行 SQL 的数据库，先建立正确性基线，为后续性能优化保留清晰接口。\n\n执行要求：\n\n1. 检查现有实现、Git 状态和构建环境，复用已有代码与 devtools/docker 工具链，保留其他会话的改动。如果尚无实现，优先沿用现有 Rust 开发环境开始实现。存储、执行、事务和向量检索核心自行实现，依赖范围遵守题面。\n\n2. 打通完整运行链路：\nJSONL 请求 → SQL 解析与校验 → 执行和事务视图 → /data 存储与恢复 → JSONL 响应。\n恢复完成后主动发送规定的 ready 对象；每个请求准确回传 id 并立即 flush；shutdown 回滚未提交事务并正常退出。补齐从源码构建的 Dockerfile。\n\n3. 逐步实现题面要求的 SQL、BIGINT/VARCHAR/VECTOR 类型、增删改查、精确 TopK、过滤检索、索引维护、事务和恢复。\n重点保证：\n- BIGINT 不经浮点中转；\n- 向量先存为有限 float32，再计算距离；\n- 先过滤、后 TopK，距离并列按主键排序；\n- 多行语句失败不能部分生效，事务之前成功的修改仍可提交；\n- 已确认提交在强杀后保留，未提交修改不部分生效；\n- 数据超过内存预算时存在分页或流式处理路径。\n先用精确检索建立独立可验证的基线，再依据实际测量决定近似加速方案。\n\n4. 复用已经完成的旧赛题迁移成果：\n通过官方 protocol_check/run.py 运行公开用例，再通过 --package 接入 tools/minivectordb-legacy-testkit。\n现有迁移包包含3个用例、32条SQL，覆盖过滤与并列、索引事务回滚和提交后重启、失败语句原子性。\n使用包内的小型数据生成器和独立 oracle 检查实际数据库结果；离线数据格式不能当作通信协议，reference.json 不能充当数据库输出。该 oracle 的精确计算适合小规模正确性验证，不要直接拿它跑大规模性能测量。\n\n5. 沿用旧题的验证方法：\n固定版本及输入指纹，每次实验使用独立数据目录，保留命令、退出码和原始 stdout/stderr；失败后解释原因、修复并复测。\n不要直接运行旧 AMD/MySQL 删表脚本，不套用 FTS/CAGRA 的评分与参数。\n迁移包已有的工具自测通过，不代表这些 SQL 已在新数据库上通过。\n\n6. 优先跑通官方公开用例、迁移用例，以及针对强杀恢复和大于内存数据的补充检查。\n记录真实失败，不修改预期结果来迎合实现。公开测试通过不能表述为正式隐藏测试全部通过。\n功能跑通后保存一个可复现版本，再进入性能优化；已有代理测算不是官方基线。\n\n主端本轮交付：\n- 实际修改的文件与设计取舍；\n- 构建、启动及复现命令；\n- 官方公开用例和迁移用例的逐项结果；\n- 补充验证的输入、原始结果与日志路径；\n- 当前版本标识、未通过项目及下一步建议。\n\nconversation.json 由侧端维护。你只保存真实开发和执行证据，并提供事实报告；不代写学生发言、理解或反思。\n```\n",
-      "draft_origin": {
-        "thread": "赛题上线测量",
-        "thread_id": "01a1c0fd-1603-7033-9431-98fb5b23a513",
-        "turn_id": "01a1c46a-220f-7cb3-a714-285d4652ec28",
-        "message_id": "msg_02da6e80bd0d5c09016af2cbaee6cc87d0b23612d85cd2994a",
-        "match": "去掉代码围栏后正文一致。"
-      }
-    },
-    {
-      "thread": "实现并验证 MiniVectorDB",
-      "thread_id": "01a1c46c-3ecd-7191-b859-6b69e2cd62a4",
-      "turn_id": "01a1c46c-46f5-77a0-8946-11deda0fbe31",
-      "message_id": "msg_0031ed2f9b2c1ffb016af2cf21994887d0907ba61af4ef44a5",
-      "turn_started_at": "2026-11-10T15:46:32+08:00",
-      "turn_status": "failed",
-      "role": "assistant",
-      "attribution": "agent_progress",
-      "content": "3 个迁移用例、32 条 SQL 已通过真实 Linux 数据库。首轮镜像构建发现 `cargo fetch` 前缺少源码目标，已修复并构建成功。接下来用小型 oracle 核对实际查询结果，再做提交过程强杀和大于内存的数据验证。\n"
-    },
-    {
-      "thread": "实现并验证 MiniVectorDB",
-      "thread_id": "01a1c46c-3ecd-7191-b859-6b69e2cd62a4",
-      "turn_id": "01a1c46c-46f5-77a0-8946-11deda0fbe31",
-      "message_id": "msg_0031ed2f9b2c1ffb016af2cf77d02c87d0a69241140460f225",
-      "turn_started_at": "2026-11-10T15:46:32+08:00",
-      "turn_status": "failed",
-      "role": "assistant",
-      "attribution": "agent_progress",
-      "content": "边界测试发现了一个公开用例未覆盖的问题：长十进制向量先转 float64 再转 float32，会在舍入中点附近存错值。已改为保留十进制文本并直接舍入到 float32，预期值未改；回归测试从失败转为通过，目前 9 项 Rust 集成测试全部通过。\n"
-    },
-    {
-      "thread": "实现并验证 MiniVectorDB",
-      "thread_id": "01a1c46c-3ecd-7191-b859-6b69e2cd62a4",
-      "turn_id": "01a1c480-a132-79e3-bc53-fb066a624ee7",
-      "message_id": "01a1c480-cb91-7fe0-9b2e-87216b5b7afc",
-      "turn_started_at": "2026-11-10T16:08:51+08:00",
-      "turn_status": "interrupted",
-      "role": "user",
-      "attribution": "participant_resume",
-      "content": "go\n"
-    },
-    {
-      "thread": "实现并验证 MiniVectorDB",
-      "thread_id": "01a1c46c-3ecd-7191-b859-6b69e2cd62a4",
-      "turn_id": "01a1c483-5ef7-7d33-b7d7-654498255040",
-      "message_id": "01a1c483-6c99-7cd1-9f9e-d820fba122cc",
-      "turn_started_at": "2026-11-10T16:11:46+08:00",
-      "turn_status": "completed",
-      "role": "user",
-      "attribution": "participant_resume",
-      "content": "go\n"
-    },
-    {
-      "thread": "实现并验证 MiniVectorDB",
-      "thread_id": "01a1c46c-3ecd-7191-b859-6b69e2cd62a4",
-      "turn_id": "01a1c483-5ef7-7d33-b7d7-654498255040",
-      "message_id": "msg_091c0d0a19dfaf4a016af2d43e3d6887d0b2952d2139b92a6a",
-      "turn_started_at": "2026-11-10T16:11:46+08:00",
-      "turn_status": "completed",
-      "role": "assistant",
-      "attribution": "agent_progress",
-      "content": "旧镜像的宽行回归确认是内存超限：16 条各 7 MiB 的记录都写入成功，随后 `ORDER BY id DESC LIMIT 1` 触发 cgroup OOM。新版本只保留排序键和行位置，已完成 Linux 构建和 13 项集成测试，正在复跑同一输入和官方用例。"
-    },
-    {
-      "thread": "实现并验证 MiniVectorDB",
-      "thread_id": "01a1c46c-3ecd-7191-b859-6b69e2cd62a4",
-      "turn_id": "01a1c483-5ef7-7d33-b7d7-654498255040",
-      "message_id": "msg_091c0d0a19dfaf4a016af2d57bad1887d09bb73605d8f74e67",
-      "turn_started_at": "2026-11-10T16:11:46+08:00",
-      "turn_status": "completed",
-      "role": "assistant",
-      "attribution": "agent_report",
-      "content": "MiniVectorDB 正确性基线已实现并保存为本地提交 `93abe64d33bc8e1eb8c618df8efe32df0f7d4472`。验证镜像为 `minivectordb:baseline-20261110-r1`。从提交归档重新构建后，二进制 SHA-256 与验证镜像一致。 [源码归档](C:/Users/faro/Documents/ChatGPT/MinivectorDB/analysis/implementation-20261110/baseline-source.zip)\n\n| 验证 | 最终结果 |\n| --- | --- |\n| 官方 JSONL 驱动 | 握手通过，公开用例 **20/20**，共 95 条 SQL |\n| 迁移包 `--package` | **3/3**，共 32 条 SQL |\n| 独立向量 oracle | 144 次实际 SQL 查询通过，两种模式的过滤组和无过滤组平均 Recall 均为 1.0 |\n| 强杀与恢复 | 6 轮均只恢复出完整事务状态，已确认的提交保留。另两次在恢复期间强杀，随后正常启动 |\n| 限内存 | 96 MiB 限额下完成 192 MiB 数据的写入、恢复、排序和检索。旧镜像触发 OOM 的 112 MiB 宽行用例也通过复测 |\n| 构建检查 | Linux 锁定构建、13 项 Rust 集成测试、fmt 和 Clippy 均通过 |\n\n实现使用追加提交日志和磁盘索引，提交同步后才应答。SQL 保留 BIGINT 整数精度，向量直接舍入到有限 float32，先过滤再按精确距离取 TopK。`ann` 当前沿用精确检索。宽行回归暴露了归并同时载入多个投影的问题，修复后排序只保留键和行位置，命中后再读投影。\n\n构建、启动和驱动复现命令已写入 README。逐项结果、失败与复测、原始请求和响应、cgroup 日志及输入指纹都可从报告查到。 [构建与复现](C:/Users/faro/Documents/ChatGPT/MinivectorDB/seekdb-2026-competition-round2/README.md) · [执行报告](C:/Users/faro/Documents/ChatGPT/MinivectorDB/analysis/implementation-20261110/report.md) · [验证索引](C:/Users/faro/Documents/ChatGPT/MinivectorDB/analysis/implementation-20261110/verification-index.json)\n\n最终本地验证无失败项。正式隐藏用例和性能成绩仍待平台验证。下一步建议用这个提交测量 10,000 行、128 维的完整 JSONL 负载，分别记录写入和查询的耗时、I/O、峰值内存，再决定是否引入近似索引。",
-      "turn_completed_at": "2026-11-10T16:27:49+08:00"
-    },
-    {
-      "thread": "实现并验证 MiniVectorDB",
-      "thread_id": "01a1c46c-3ecd-7191-b859-6b69e2cd62a4",
-      "turn_id": "01a1c4b9-a0dc-74c2-ba37-48fd93a1ff4f",
-      "message_id": "01a1c4b9-a487-7000-9cad-c4b0e90e67c2",
-      "turn_started_at": "2026-11-10T17:11:02+08:00",
-      "turn_status": "completed",
-      "role": "user",
-      "attribution": "agent_prompt_reposted_by_participant",
-      "content": "\\# MiniVectorDB 下一轮 · 建立性能基线并定位开销\\\n\\\n本轮目标是用真实数据库建立可复现的写入和 TopK 性能基线，检验一个可能影响优化顺序的查询路径差异。按调查模式执行，建议使用高推理强度。\\\n\\\n完成条件是交付可重跑的基准入口、三轮写入和查询原始指标、正确性对照及一次查询路径诊断。拿到可比较的结果后回报，留出一轮根据证据选择实现改动。遇到结果错误、超时或资源采集缺失时，保留实际失败输出和最小复现，继续完成其余可执行检查。\\\n\\\n\\## 起点\\\n\\\n实现仓库为 \\`C:/Users/faro/Documents/ChatGPT/MinivectorDB/seekdb-2026-competition-round2\\`。主端聊天关联的 \\`MinivectorDB 2\\` 是另一个目录。先在实现仓库运行 \\`git rev-parse --show-toplevel HEAD\\` 和 \\`git status --short --branch\\`。基线提交为 \\`93abe64d33bc8e1eb8c618df8efe32df0f7d4472\\`，镜像为 \\`minivectordb:baseline-20261110-r1\\`，Linux 二进制 SHA-256 为 \\`5a763becf46a575ac2d949296a7e768a6375f16f0eee5deb945576f23a1f696e\\`。核对镜像指纹后使用。需要重建时使用报告中的源码归档和构建命令。若工作树已有更新，保留现有改动，从隔离的基线归档取样。\\\n\\\n读 \\`STDIO_PROTOCOL.md\\`、\\`protocol_check/config.json\\` 和 \\`../analysis/implementation-20261110/report.md\\`。基线镜像的公开用例为 20/20、迁移用例为 3/3。核对官方题面第 3.3 节和配套分支是否有更新。以下负载按当前题面默认值和公开配置设计，正式参数以组织方冻结版本为准。 [官方题面]\\(https\\://oceanbase.yuque.com/org-wiki-obtech-vh7w9r/hc3pio/lg8enxlmwg69unt6) · [配套分支]\\(https\\://github.com/oceanbase/seekdb/tree/2026-competition-round2)\\\n\\\n\\## 执行\\\n\\\n1\\. \\*\\*跑真实基准。\\*\\* 用 Linux amd64 镜像和真实 JSONL 单客户端，逐条发送请求并等待响应。固定种子、行宽、类别分布、输入 SHA-256、预热流程及资源限制。以 2 CPU、2 GiB、128 PID、禁用 swap、禁网和独立 \\`/data\\` 作为当前本地配置。写入从空表开始，10,000 行、128 维，每批 100 行并提交。查询装载并准备向量索引后，在 \\`exact\\` 模式下跑 1,000 次 K=10，其中 500 次等值过滤。每项各跑三轮，每轮使用独立容器、cgroup 和数据目录。查找可复用的驱动和记录器，必要时新增最小的本地基准入口，复用 \\`tools/dev_capture.py\\` 保留命令、指纹、退出码与原始日志。\\\n2\\. \\*\\*分开记录 T、B、M。\\*\\* 驱动在容器外测端到端墙钟。写入 T 覆盖全部批次直至最后的持久化成功响应。查询 T 覆盖正式查询序列，单列准备和预热耗时。B/M 从数据库启动覆盖到计量结束和相关写回完成，包含装载、索引准备、预热和页缓存。驱动及事后校验与数据库 cgroup 隔离。按 cgroup v2 专用数据设备的 \\`io.stat\\` 读写字节增量和 \\`memory.peak\\` 取值。无法确认归属时将对应指标标为缺测，并保留采集输出和原因。结果标为本地基线，六项正式基线未发布时以六项实测值比较。\\\n3\\. \\*\\*校验实际结果。\\*\\* 计时结束后对照写入记录的数量、内容和重启后的状态。对真实查询响应做独立真值比对，核对 ID、距离、并列主键顺序以及过滤结果数量。分别记录两组 Recall@10，正式门槛均为 0.95，本轮 \\`exact\\` 按精确结果核对。完整规模真值在计量外计算，复用小样本 oracle 交叉验证极近距离、并列和空过滤集合。镜像重建后按仓库 README 复跑 \\`protocol_check/run.py\\` 的握手、公开包和迁移包。\\\n4\\. \\*\\*做一次配对诊断。\\*\\* 先核对 \\`src/query.rs\\` 的 \\`Plan::covered_vector\\` 和 \\`src/storage.rs\\` 的 \\`VectorView\\`。在独立诊断数据中把 \\`category\\` 固定为同一值，在事务外使用同一索引和查询向量，投影只取主键与 \\`L2_DISTANCE\\`，按距离排序并限制 K=10。配对比较无 WHERE 和命中全表的 \\`WHERE category = 'all'\\`，互换执行顺序并核对 TopK 响应一致。两组应有相同数量的候选向量。记录路径耗时与波动，区分观察到的路径差异与读盘、解码、距离计算等仍需验证的归因。把这一诊断与默认混合负载分开报告。\\\n\\\n\\## 回传给侧端\\\n\\\n交付逐轮表格，列出版本、输入 SHA-256、写入和查询的 T/B/M、两组 Recall、回归结果和缺测项。附复现命令、输出目录，以及足以放入 \\`conversation.json\\` 的短原始片段，含一条实际请求、对应响应和资源读数。给出数据最支持的一个优化切入点、可能代价和能推翻判断的观测。保留真实失败。由侧端整理学习材料，参赛者的判断使用实际对话原文。\\\n",
-      "draft_origin": {
-        "thread": "优化 MiniVectorDB 赛题提示词",
-        "file": "analysis/agent-evidence/codex-minivectordb-perf-baseline.md",
-        "match": "移除 Markdown 转义和行尾续行后，与侧端草稿正文一致。"
-      }
-    },
-    {
-      "thread": "实现并验证 MiniVectorDB",
-      "thread_id": "01a1c46c-3ecd-7191-b859-6b69e2cd62a4",
-      "turn_id": "01a1c4b9-a0dc-74c2-ba37-48fd93a1ff4f",
-      "message_id": "msg_091c0d0a19dfaf4a016af2e0fb52f887d0b6d2843f140df525",
-      "turn_started_at": "2026-11-10T17:11:02+08:00",
-      "turn_status": "completed",
-      "role": "assistant",
-      "attribution": "agent_progress",
-      "content": "专用 ext4 设备的探针通过了。外部执行同步后，4 MiB 缓冲写入计入了写入进程的 cgroup，随后回读也在同一设备行计入 4 MiB。正式轮次会只取这条设备行，避免把虚拟设备和它的后端设备重复相加。"
-    },
-    {
-      "thread": "实现并验证 MiniVectorDB",
-      "thread_id": "01a1c46c-3ecd-7191-b859-6b69e2cd62a4",
-      "turn_id": "01a1c4b9-a0dc-74c2-ba37-48fd93a1ff4f",
-      "message_id": "msg_091c0d0a19dfaf4a016af2e2ae4d8087d089ad72119a69243a",
-      "turn_started_at": "2026-11-10T17:11:02+08:00",
-      "turn_status": "completed",
-      "role": "assistant",
-      "attribution": "agent_progress",
-      "content": "第一批完整查询出现了一次 B 缺测。`syncfs` 已成功，设备字节数也连续稳定，但 2 秒观察期内 `file_dirty` 没归零，采集器按规则保留了缺测。其他轮次已观察到归零，我会保留这次原始读数，用更长观察窗口和新数据目录补测这一轮。"
-    },
-    {
-      "thread": "实现并验证 MiniVectorDB",
-      "thread_id": "01a1c46c-3ecd-7191-b859-6b69e2cd62a4",
-      "turn_id": "01a1c4b9-a0dc-74c2-ba37-48fd93a1ff4f",
-      "message_id": "msg_091c0d0a19dfaf4a016af2e35f77b887d09a055c767b6493ba",
-      "turn_started_at": "2026-11-10T17:11:02+08:00",
-      "turn_status": "completed",
-      "role": "assistant",
-      "attribution": "agent_progress",
-      "content": "补测拿到了完整的 B，初次缺测记录也已保留。计量外的独立核对全部通过，包括三轮写入重启后的 10,000 行，以及四次查询执行的全部 TopK 响应。配对诊断的 64 对结果完全一致，全行路径在每一对中都更慢。"
-    },
-    {
-      "thread": "实现并验证 MiniVectorDB",
-      "thread_id": "01a1c46c-3ecd-7191-b859-6b69e2cd62a4",
-      "turn_id": "01a1c4b9-a0dc-74c2-ba37-48fd93a1ff4f",
-      "message_id": "msg_091c0d0a19dfaf4a016af2e4b2a4b887d0a1114de6804b759f",
-      "turn_started_at": "2026-11-10T17:11:02+08:00",
-      "turn_status": "completed",
-      "role": "assistant",
-      "attribution": "agent_report",
-      "content": "MiniVectorDB 的本地性能基线已跑完。写入和查询各有三轮完整 T/B/M，使用提交 `93abe64d33bc8e1eb8c618df8efe32df0f7d4472`、镜像 `minivectordb:baseline-20261110-r1`。二进制指纹核对一致，统一输入 SHA-256 为 `85f54aad7649c5b3ea1cefd2c7d4677dab35e3c3dedf359d68a3f5340645738a`。\n\n| 轮次 | 写入 T / B / M | 查询 T / B / M | 过滤 / 无过滤 Recall@10 |\n|---|---:|---:|---:|\n| 1，查询补测 | 1.950 s / 6.750 MiB / 9.391 MiB | 16.464 s / 7.129 MiB / 10.820 MiB | 1.000 / 1.000 |\n| 2 | 1.910 s / 6.750 MiB / 9.949 MiB | 12.557 s / 7.129 MiB / 10.453 MiB | 1.000 / 1.000 |\n| 3 | 1.913 s / 6.750 MiB / 9.961 MiB | 12.901 s / 7.129 MiB / 11.020 MiB | 1.000 / 1.000 |\n| **中位数** | **1.913 s / 6.750 MiB / 9.949 MiB** | **12.901 s / 7.129 MiB / 10.820 MiB** | **1.000 / 1.000** |\n\n三轮写入重启后均逐字段核对了全部 10,000 行。包含首次缺测执行在内，4,000 条查询响应的 ID、顺序和距离全部匹配独立精确真值。握手 **1/1**、公开包 **20/20**、迁移包 **3/3**。首次查询 1 的 T 为 **12.355 s**，B 因同步后观察窗口内 `file_dirty` 未归零而保留为缺测。补测在新目录中延长观察窗口，取得了完整指标。 [逐轮原始指标](C:/Users/faro/Documents/ChatGPT/MinivectorDB/analysis/performance-baseline-20261110/evidence-index.json) · [缺测复现](C:/Users/faro/Documents/ChatGPT/MinivectorDB/analysis/performance-baseline-20261110/writeback-gate-repro.json)\n\n**配对诊断支持先试窄字段过滤。** 在同样 10,000 个候选下，64 对 TopK 完全一致。无 WHERE 的覆盖路径中位数为 **16.303 ms**，全命中 WHERE 的完整行路径为 **21.938 ms**，配对差中位数 **5.411 ms**，互换顺序后方向一致。诊断整轮设备读计数为 0，具体开销仍需拆分。下一轮可先只读过滤字段，命中后再读向量。若同输入 A/B 下过滤查询耗时未稳定下降，或额外 I/O、内存和写入成本抵消收益，就放弃这条路径。 [配对数据](C:/Users/faro/Documents/ChatGPT/MinivectorDB/analysis/performance-baseline-20261110/run-01/paired/paired-summary.json)\n\n配套分支和题面镜像第 3.3 节已复核，语雀正文未能独立确认。以上为本地实测六项指标。复跑命令、数据目录、原始日志和口径均在报告中，另附一条实际请求、对应响应及同轮资源读数。 [报告与复跑命令](C:/Users/faro/Documents/ChatGPT/MinivectorDB/analysis/performance-baseline-20261110/report.md) · [基准入口](C:/Users/faro/Documents/ChatGPT/MinivectorDB/analysis/performance-baseline-20261110/run_suite.ps1) · [短原始片段](C:/Users/faro/Documents/ChatGPT/MinivectorDB/analysis/performance-baseline-20261110/raw-sample.txt)",
-      "turn_completed_at": "2026-11-10T17:32:54+08:00"
+     "id": "q04",
+     "pointer": "/conversations/3/content",
+     "excerpt": "新题包，分析 MiniVectorDB 要拿性能满分，写入、查询、I/O 和内存应该优先优化哪些地方。"
     }
-  ],
-  "experiments": [
+   ],
+   "raw_results": [
     {
-      "id": "proxy-upper-bound",
-      "title": "公开题包与 E 上界的本地代理测算",
-      "scope": "本地代理和公式复算",
-      "input_context": "三种存储代理合计 27 轮。使用 10,000 行、128 维、固定生成数据和 1 CPU、512 MiB。不同布局分别测六项指标，再以零候选开销代入公式求条件包络。代理未覆盖完整数据库、SQL 和真实 JSONL，正式六项基线仍需官方发布。",
-      "observations": [
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/perf-estimate-20261109/calculation-verification.json",
-          "source_sha256": "fa0c440c2b82bee1076ae0a7367bca3512e30c30a6d4c64ae93553bb244a27fa",
-          "excerpt": "{\n  \"runs_checked\": 27,\n  \"source_hash_matched\": true,\n  \"bounds\": {\n    \"append\": \"0.958130510211189316161302085151606788101146745\",\n    \"wal\": \"0.974116879525945231738647682556966457300842443\",\n    \"text\": \"0.977746475274208619452159081521372638759980125\"\n  },\n  \"status\": \"PASS\"\n}"
-        }
-      ]
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/perf-estimate-20261109/summary.json",
+     "source_sha256": "d08359135131ca873303c2fe1bd3435040de902224f819890b9520b1ba582815",
+     "output": "{\"surrogate_baselines\":{\"append\":{\"median_metrics\":{\"write\":{\"T_ms\":138.20664,\"B_MiB\":6.07421875,\"M_MiB\":8.18359375},\"query\":{\"T_ms\":402.965967,\"B_MiB\":6.07421875,\"M_MiB\":14.3828125}},\"bounds\":{\"zero_cost_upper\":0.9581305102111893,\"all_metrics_equal_to_baseline\":0.5,\"both_times_zero_resources_equal\":0.7975857967125647,\"query_time_zero_other_metrics_equal\":0.699012262677372}},\"wal\":{\"median_metrics\":{\"write\":{\"T_ms\":290.832079,\"B_MiB\":12.1484375,\"M_MiB\":14.06640625},\"query\":{\"T_ms\":422.979544,\"B_MiB\":12.1484375,\"M_MiB\":20.3203125}},\"bounds\":{\"zero_cost_upper\":0.9741168795259453,\"all_metrics_equal_to_baseline\":0.5,\"both_times_zero_resources_equal\":0.7983757929449329,\"query_time_zero_other_metrics_equal\":0.6990587782267469}},\"text\":{\"median_metrics\":{\"write\":{\"T_ms\":235.775103,\"B_MiB\":14.65625,\"M_MiB\":17.6640625},\"query\":{\"T_ms\":533.389276,\"B_MiB\":14.65625,\"M_MiB\":23.3125}},\"bounds\":{\"zero_cost_upper\":0.9777464752742087,\"all_metrics_equal_to_baseline\":0.5,\"both_times_zero_resources_equal\":0.798411749109762,\"query_time_zero_other_metrics_equal\":0.6992528800670262}}}}"
     },
     {
-      "id": "legacy-test-transfer",
-      "title": "旧向量检验方法迁入 MiniVectorDB",
-      "scope": "本地最终基线镜像",
-      "input_context": "用官方 JSONL 驱动的自定义包入口运行 3 个适配用例，覆盖先过滤后 TopK、索引与事务回滚/重启、失败语句原子性。另用独立 oracle 复核真实响应，3 个种子各 96 行、8 维、24 条查询，两种模式共 144 条。此版本两种模式都走精确检索。",
-      "runs": [
-        {
-          "source": "analysis/implementation-20261110/legacy-image-final/result.json",
-          "started_at": "2026-11-10T08:22:02Z",
-          "exit_code": 0,
-          "argv": [
-            "docker",
-            "run",
-            "--rm",
-            "--pull=never",
-            "--network=none",
-            "--mount",
-            "type=bind,src=C:/Users/faro/Documents/ChatGPT/MinivectorDB,dst=/workspace",
-            "--mount",
-            "type=bind,src=C:/Users/faro/Documents/ChatGPT/MinivectorDB/analysis/implementation-20261110/docker-cli,dst=/usr/local/bin/docker,readonly",
-            "--mount",
-            "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
-            "--workdir",
-            "/workspace/seekdb-2026-competition-round2",
-            "python:3.11-slim-bookworm",
-            "python3",
-            "protocol_check/run.py",
-            "--image",
-            "minivectordb:baseline-20261110-r1",
-            "--package",
-            "tools/minivectordb-legacy-testkit",
-            "--output",
-            "/workspace/analysis/implementation-20261110/legacy-image-results-final"
-          ],
-          "inputs": {
-            "seekdb-2026-competition-round2/tools/minivectordb-legacy-testkit/manifest.json": "25947dde2243778eaaabeebadf956848b11463a9cdf5f53acb476eb64e5bd00d",
-            "seekdb-2026-competition-round2/protocol_check/config.json": "22d6504994020264281a3e6770ad2855bf4ffcea8f62386ad18f7bd936fb5441"
-          }
-        },
-        {
-          "source": "analysis/implementation-20261110/oracle-final/result.json",
-          "started_at": "2026-11-10T08:22:02Z",
-          "exit_code": 0,
-          "argv": [
-            "docker",
-            "run",
-            "--rm",
-            "--pull=never",
-            "--network=none",
-            "--cpus=2",
-            "--memory=128m",
-            "--memory-swap=128m",
-            "--pids-limit=128",
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges",
-            "--mount",
-            "type=bind,src=C:/Users/faro/Documents/ChatGPT/MinivectorDB,dst=/workspace",
-            "--mount",
-            "type=volume,dst=/dbtest",
-            "--mount",
-            "type=image,src=minivectordb:baseline-20261110-r1,dst=/submission",
-            "--workdir",
-            "/workspace/seekdb-2026-competition-round2",
-            "python:3.11-slim-bookworm",
-            "python3",
-            "tools/verify_extended.py",
-            "--scenario",
-            "oracle",
-            "--binary",
-            "/submission/minivectordb",
-            "--out",
-            "/workspace/analysis/implementation-20261110/oracle-results-final",
-            "--data-root",
-            "/dbtest/run"
-          ],
-          "inputs": {
-            "seekdb-2026-competition-round2/tools/verify_extended.py": "d7f50cfba740510bc7e4f8fd1f0a2b275319774600a686a1da2eed0698c18c33",
-            "seekdb-2026-competition-round2/tools/verify_database.py": "f1f87b8b9446162d67799fcfd4678c9d298df9be3d073b16bd65da77b50a4eb7"
-          }
-        }
-      ],
-      "observations": [
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/legacy-image-final/stdout.log",
-          "source_sha256": "a140bee23369fbdcb0f327375e3899c9e548ee8c11b41da06a8880561f540005",
-          "excerpt": "legacy_filtered_topk: PASS \nlegacy_index_rollback_restart: PASS \nlegacy_failed_index_tx: PASS "
-        },
-        {
-          "source_kind": "test_input",
-          "source": "analysis/implementation-20261110/oracle-results-final/20261110/requests.jsonl",
-          "source_sha256": "c645e2a833786b7e82ed0983df2b945fa11263e552c2897b02ac48873edc0cc7",
-          "excerpt": "{\"id\": 5, \"op\": \"execute\", \"sql\": \"SELECT id,L2_DISTANCE(embedding,'[-0.09886987507343292, 0.10769322514533997, 0.10963966697454453, -0.02427256666123867, -0.11884915828704834, 0.375161349773407, -0.2528766095638275, 0.1623062640428543]') AS distance FROM docs WHERE category='a' ORDER BY distance LIMIT 10;\", \"search_mode\": \"exact\"}"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/oracle-results-final/20261110/stdout.jsonl",
-          "source_sha256": "56a7b9206fac7506944241a3d861a8c3775a4a366361b5be758ff33aa0d29364",
-          "excerpt": "{\"id\":5,\"ok\":true,\"columns\":[\"id\",\"distance\"],\"rows\":[[27,1.1822364803557652],[55,1.2039372424476218],[21,1.2082618587899778],[3,1.2938483346705618],[89,1.3526321363132179],[57,1.4041532975126867],[93,1.4133586644919374],[67,1.469745917663778],[95,1.4731204810673681],[15,1.4803719364061783]]}"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/oracle-results-final/20261110/check-exact.json",
-          "source_sha256": "6245de13f6e3613894aa5ad060c553bbde2b0a9ba5551dff354ce780d3975aac",
-          "excerpt": "  \"status\": \"pass\",\n      \"samples\": 12,\n      \"mean_recall\": 1.0\n      \"samples\": 12,\n      \"mean_recall\": 1.0"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/oracle-results-final/result.json",
-          "source_sha256": "0638c839a0bc0f96fb543595a69b3798fef00b2681739bd9afed04b077d1c628",
-          "excerpt": "{\n  \"passed\": true,\n  \"query_count\": 144,"
-        }
-      ]
-    },
-    {
-      "id": "public-protocol",
-      "title": "镜像握手及公开功能用例",
-      "scope": "本地最终基线镜像",
-      "input_context": "公开题包 f4d4e266 的公开驱动和资源配置。20 个公开用例全部执行。源码归档重建后的二进制指纹见摘录。",
-      "runs": [
-        {
-          "source": "analysis/implementation-20261110/public-image-final/result.json",
-          "started_at": "2026-11-10T08:22:02Z",
-          "exit_code": 0,
-          "argv": [
-            "docker",
-            "run",
-            "--rm",
-            "--pull=never",
-            "--network=none",
-            "--mount",
-            "type=bind,src=C:/Users/faro/Documents/ChatGPT/MinivectorDB,dst=/workspace",
-            "--mount",
-            "type=bind,src=C:/Users/faro/Documents/ChatGPT/MinivectorDB/analysis/implementation-20261110/docker-cli,dst=/usr/local/bin/docker,readonly",
-            "--mount",
-            "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
-            "--workdir",
-            "/workspace/seekdb-2026-competition-round2",
-            "python:3.11-slim-bookworm",
-            "python3",
-            "protocol_check/run.py",
-            "--image",
-            "minivectordb:baseline-20261110-r1",
-            "--output",
-            "/workspace/analysis/implementation-20261110/public-image-results-final"
-          ],
-          "inputs": {
-            "seekdb-2026-competition-round2/mysqltest/manifest.json": "549079acfed240abb41b8f62af03e94b6081659483d145ee739f7ecb9feb3949",
-            "seekdb-2026-competition-round2/protocol_check/config.json": "22d6504994020264281a3e6770ad2855bf4ffcea8f62386ad18f7bd936fb5441"
-          }
-        }
-      ],
-      "observations": [
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/handshake-final/stdout.log",
-          "source_sha256": "2861dbc2a069d7387a4a3fb4e86fb08dc2c31ba04c1d4a2db356fd2c4a78a49d",
-          "excerpt": "handshake: PASS \nReport: /workspace/analysis/implementation-20261110/handshake-results-final/result.json"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/public-image-final/stdout.log",
-          "source_sha256": "c988460679192b6856da7a14146b9a9da4881c7999c19e127fb588d6f2a3af49",
-          "excerpt": "sql_crud: PASS \nsql_comparisons: PASS \nsql_ordering: PASS \nsql_empty: PASS \nsql_primary_key: PASS \nsql_unicode: PASS \nsql_bigint: PASS \nsql_unsupported: PASS \nstorage_restart: PASS \nvector_euclidean: PASS \ntransaction_commit: PASS \ntransaction_rollback: PASS \nstorage_mutations: PASS \nstorage_multiple_tables: PASS \nvector_ties_and_filter: PASS \nvector_float32: PASS \nvector_index_maintenance: PASS \ntransaction_failed_insert: PASS \ntransaction_autocommit_atomic: PASS \ntransaction_shutdown_rollback: PASS "
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/archive-binary-fingerprint/stdout.log",
-          "source_sha256": "97029434271407809b9c0de489caea7929a9ddbaa5cf461bda851e4f167780af",
-          "excerpt": "5a763becf46a575ac2d949296a7e768a6375f16f0eee5deb945576f23a1f696e  /submission/minivectordb"
-        }
-      ]
-    },
-    {
-      "id": "float32-rounding",
-      "title": "长十进制直接舍入至 float32 的回归",
-      "scope": "本地构建与测试",
-      "input_context": "测试向量的第一维处在 float32 两个相邻值的中点上方。首次测试得到 1.0，预期 1.0000001192092896。保留十进制输入文本，直接按 float32 舍入后复测。",
-      "runs": [
-        {
-          "source": "analysis/implementation-20261110/rounding-red/result.json",
-          "started_at": "2026-11-10T08:00:52Z",
-          "exit_code": 101,
-          "argv": [
-            "cargo",
-            "test",
-            "--locked",
-            "--test",
-            "database",
-            "decimal_vector_rounding_does_not_round_through_f64",
-            "--",
-            "--nocapture"
-          ],
-          "inputs": {}
-        },
-        {
-          "source": "analysis/implementation-20261110/rounding-green-02/result.json",
-          "started_at": "2026-11-10T08:01:27Z",
-          "exit_code": 0,
-          "argv": [
-            "cargo",
-            "test",
-            "--locked",
-            "--",
-            "--nocapture"
-          ],
-          "inputs": {}
-        }
-      ],
-      "observations": [
-        {
-          "source_kind": "test_input",
-          "source": "seekdb-2026-competition-round2/tests/database.rs",
-          "source_sha256": "4340bc05db9e08df888028ec87c4b7c7161ae784fd44dc0246b9f9756b6e026b",
-          "excerpt": "        \"INSERT INTO t VALUES (1,'[1.000000059604644775390626,0]');\",\n    assert_eq!(r[2][\"rows\"], json!([[[1.0000001192092896_f64, 0.0]]]));"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/rounding-red/stderr.log",
-          "source_sha256": "a96061a58266ba1bf6bc7635e3ea42cb7fceddeec076c765915660ea5ad058ee",
-          "excerpt": "assertion `left == right` failed\n  left: Array [Array [Array [Number(1.0), Number(0.0)]]]\n right: Array [Array [Array [Number(1.0000001192092896), Number(0.0)]]]"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/rounding-green-02/stdout.log",
-          "source_sha256": "a0c2f48de4bbe288875d9f59aaed174753532f349ae460575941b77eec19e1f0",
-          "excerpt": "test decimal_vector_rounding_does_not_round_through_f64 ... ok"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/linux-final/stdout.log",
-          "source_sha256": "09d4e72c3703c023489a4012ce7a4fe29284a1ec5ce95c7e868c816fce7653b8",
-          "excerpt": "test decimal_vector_rounding_does_not_round_through_f64 ... ok\ntest result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s"
-        }
-      ]
-    },
-    {
-      "id": "wide-projection",
-      "title": "限内存宽行排序 OOM 与复测",
-      "scope": "本地两版镜像",
-      "input_context": "16 行、每行 7 MiB，容器限 96 MiB，查询只返回一行。失败后将排序状态改为排序键和行位置，命中后读回投影。两轮测试脚本主文件指纹相同，容器参数差异见实际参数。",
-      "runs": [
-        {
-          "source": "analysis/implementation-20261110/wide-red-oom/result.json",
-          "started_at": "2026-11-10T08:20:56Z",
-          "exit_code": 1,
-          "argv": [
-            "docker",
-            "run",
-            "--rm",
-            "--network=none",
-            "--cpus=2",
-            "--memory=96m",
-            "--memory-swap=96m",
-            "--mount",
-            "type=bind,src=C:/Users/faro/Documents/ChatGPT/MinivectorDB,dst=/workspace",
-            "--mount",
-            "type=volume,dst=/dbtest",
-            "--mount",
-            "type=image,src=minivectordb:baseline-20261110,dst=/submission",
-            "--workdir",
-            "/workspace/seekdb-2026-competition-round2",
-            "python:3.11-slim-bookworm",
-            "python3",
-            "tools/verify_extended.py",
-            "--scenario",
-            "wide",
-            "--binary",
-            "/submission/minivectordb",
-            "--out",
-            "/workspace/analysis/implementation-20261110/wide-red-oom-results",
-            "--data-root",
-            "/dbtest/run"
-          ],
-          "inputs": {
-            "seekdb-2026-competition-round2/tools/verify_extended.py": "d7f50cfba740510bc7e4f8fd1f0a2b275319774600a686a1da2eed0698c18c33"
-          }
-        },
-        {
-          "source": "analysis/implementation-20261110/wide-final/result.json",
-          "started_at": "2026-11-10T08:22:02Z",
-          "exit_code": 0,
-          "argv": [
-            "docker",
-            "run",
-            "--rm",
-            "--pull=never",
-            "--network=none",
-            "--cpus=2",
-            "--memory=96m",
-            "--memory-swap=96m",
-            "--pids-limit=128",
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges",
-            "--mount",
-            "type=bind,src=C:/Users/faro/Documents/ChatGPT/MinivectorDB,dst=/workspace",
-            "--mount",
-            "type=volume,dst=/dbtest",
-            "--mount",
-            "type=image,src=minivectordb:baseline-20261110-r1,dst=/submission",
-            "--workdir",
-            "/workspace/seekdb-2026-competition-round2",
-            "python:3.11-slim-bookworm",
-            "python3",
-            "tools/verify_extended.py",
-            "--scenario",
-            "wide",
-            "--binary",
-            "/submission/minivectordb",
-            "--out",
-            "/workspace/analysis/implementation-20261110/wide-results-final",
-            "--data-root",
-            "/dbtest/run"
-          ],
-          "inputs": {
-            "seekdb-2026-competition-round2/tools/verify_extended.py": "d7f50cfba740510bc7e4f8fd1f0a2b275319774600a686a1da2eed0698c18c33",
-            "seekdb-2026-competition-round2/tools/verify_database.py": "f1f87b8b9446162d67799fcfd4678c9d298df9be3d073b16bd65da77b50a4eb7"
-          }
-        }
-      ],
-      "observations": [
-        {
-          "source_kind": "test_input",
-          "source": "seekdb-2026-competition-round2/tools/verify_extended.py",
-          "source_sha256": "d7f50cfba740510bc7e4f8fd1f0a2b275319774600a686a1da2eed0698c18c33",
-          "excerpt": "    count=16\n    text_bytes=7*1024*1024\n            actual=c.sql('SELECT id,s FROM wide ORDER BY id DESC LIMIT 1;')['rows']"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/wide-red-oom/stderr.log",
-          "source_sha256": "80c669df8f40e92c87ecabb136f05f66bc1de451d09497241d89789cf94eaad1",
-          "excerpt": "AssertionError: database exited before response (exit -9)"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/wide-red-oom-results/resources.json",
-          "source_sha256": "e69b9ab5227d931bcd0c89148374243d1c343ce90fc50e941e5331b6688a882e",
-          "excerpt": "  \"memory.max\": \"100663296\\n\",\n  \"memory.events\": \"low 0\\nhigh 0\\nmax 1010\\noom 1\\noom_kill 1\\noom_group_kill 0\\n\""
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/wide-final/stdout.log",
-          "source_sha256": "abded05b2b5a6c7f25eb815ad55a355428f831bf707eedbe413fde6ec7fcf5fc",
-          "excerpt": "PASS wide projection: 16 rows x 7340032 bytes, LIMIT 1"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/wide-results-final/result.json",
-          "source_sha256": "f3f7fdfd4e39e4f933e7d5100038d9f8f1fcaf35ea66ee9bf4489ff455b8e34f",
-          "excerpt": "{\n  \"passed\": true,\n  \"rows\": 16,\n  \"row_text_bytes\": 7340032,\n  \"returned_id\": 16,\n  \"memory_limit_bytes\": 100663296,\n  \"memory_peak_bytes\": 100663296\n}"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/wide-results-final/resources.json",
-          "source_sha256": "dd359cf3faf05d71319c7dfc788397249bd188dd101f9b63c507a6a70f73f149",
-          "excerpt": "  \"memory.max\": \"100663296\\n\",\n  \"memory.events\": \"low 0\\nhigh 0\\nmax 871\\noom 0\\noom_kill 0\\noom_group_kill 0\\n\""
-        }
-      ]
-    },
-    {
-      "id": "crash-and-large-recovery",
-      "title": "强杀提交与大于内存的数据恢复",
-      "scope": "本地最终基线镜像",
-      "input_context": "提交试验每轮先保留 1 行，提交新增 8,000 行时在不同时机发送 SIGKILL，检查原子性。大数据试验含 24,576 行、每行 8,192 字节文本，在 96 MiB 限额下两次于 ready 之前中断恢复，再启动后检查排序和过滤检索。",
-      "runs": [
-        {
-          "source": "analysis/implementation-20261110/crash-final/result.json",
-          "started_at": "2026-11-10T08:22:02Z",
-          "exit_code": 0,
-          "argv": [
-            "docker",
-            "run",
-            "--rm",
-            "--pull=never",
-            "--network=none",
-            "--cpus=2",
-            "--memory=128m",
-            "--memory-swap=128m",
-            "--pids-limit=128",
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges",
-            "--mount",
-            "type=bind,src=C:/Users/faro/Documents/ChatGPT/MinivectorDB,dst=/workspace",
-            "--mount",
-            "type=volume,dst=/dbtest",
-            "--mount",
-            "type=image,src=minivectordb:baseline-20261110-r1,dst=/submission",
-            "--workdir",
-            "/workspace/seekdb-2026-competition-round2",
-            "python:3.11-slim-bookworm",
-            "python3",
-            "tools/verify_extended.py",
-            "--scenario",
-            "crash",
-            "--binary",
-            "/submission/minivectordb",
-            "--out",
-            "/workspace/analysis/implementation-20261110/crash-results-final",
-            "--data-root",
-            "/dbtest/run"
-          ],
-          "inputs": {
-            "seekdb-2026-competition-round2/tools/verify_extended.py": "d7f50cfba740510bc7e4f8fd1f0a2b275319774600a686a1da2eed0698c18c33",
-            "seekdb-2026-competition-round2/tools/verify_database.py": "f1f87b8b9446162d67799fcfd4678c9d298df9be3d073b16bd65da77b50a4eb7"
-          }
-        },
-        {
-          "source": "analysis/implementation-20261110/large-final/result.json",
-          "started_at": "2026-11-10T08:22:02Z",
-          "exit_code": 0,
-          "argv": [
-            "docker",
-            "run",
-            "--rm",
-            "--pull=never",
-            "--network=none",
-            "--cpus=2",
-            "--memory=96m",
-            "--memory-swap=96m",
-            "--pids-limit=128",
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges",
-            "--mount",
-            "type=bind,src=C:/Users/faro/Documents/ChatGPT/MinivectorDB,dst=/workspace",
-            "--mount",
-            "type=volume,dst=/dbtest",
-            "--mount",
-            "type=image,src=minivectordb:baseline-20261110-r1,dst=/submission",
-            "--workdir",
-            "/workspace/seekdb-2026-competition-round2",
-            "python:3.11-slim-bookworm",
-            "python3",
-            "tools/verify_extended.py",
-            "--scenario",
-            "large",
-            "--binary",
-            "/submission/minivectordb",
-            "--out",
-            "/workspace/analysis/implementation-20261110/large-results-final",
-            "--data-root",
-            "/dbtest/run"
-          ],
-          "inputs": {
-            "seekdb-2026-competition-round2/tools/verify_extended.py": "d7f50cfba740510bc7e4f8fd1f0a2b275319774600a686a1da2eed0698c18c33",
-            "seekdb-2026-competition-round2/tools/verify_database.py": "f1f87b8b9446162d67799fcfd4678c9d298df9be3d073b16bd65da77b50a4eb7"
-          }
-        }
-      ],
-      "observations": [
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/crash-final/stdout.log",
-          "source_sha256": "c620225a8cdeb3e28dd3166782115252c9bf1bb806aea81e287fb92d4c45ba28",
-          "excerpt": "PASS commit SIGKILL delay=0: 1 visible rows; later commit retained\nPASS commit SIGKILL delay=0.0005: 1 visible rows; later commit retained\nPASS commit SIGKILL delay=0.002: 1 visible rows; later commit retained\nPASS commit SIGKILL delay=0.008: 1 visible rows; later commit retained\nPASS commit SIGKILL delay=0.02: 8001 visible rows; later commit retained\nPASS commit SIGKILL delay=0.05: 8001 visible rows; later commit retained"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/large-final/stdout.log",
-          "source_sha256": "58b35586f4d1d3d0459169c8de55f648ca8eb9ee4e7cf0814abccd492defa95f",
-          "excerpt": "PASS larger-than-memory: 201326592 logical bytes, limit 100663296, peak 100663296; recovery interrupted twice"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/implementation-20261110/large-results-final/result.json",
-          "source_sha256": "df944b62901333c18a94df0126bf9632558c1e96fddf08c822e366ca1fb6528f",
-          "excerpt": "      \"recovery_index_observed\": true,\n      \"ready_before_kill\": false,\n      \"exit_code\": -9\n      \"recovery_index_observed\": true,\n      \"ready_before_kill\": false,\n      \"exit_code\": -9\n  \"sorted_rows\": 24576,"
-        }
-      ]
-    },
-    {
-      "id": "performance-baseline-and-paired-diagnosis",
-      "title": "真实数据库三轮性能基线与过滤路径配对诊断",
-      "scope": "本地基线镜像的 JSONL 端到端测量",
-      "input_context": "提交 93abe64d33bc8e1eb8c618df8efe32df0f7d4472，镜像 minivectordb:baseline-20261110-r1，输入 SHA-256 85f54aad7649c5b3ea1cefd2c7d4677dab35e3c3dedf359d68a3f5340645738a。固定种子 20261110，10,000 行、128 维，写入每批 100 行并提交，查询 1,000 条、K=10，过滤和无过滤各半。每轮独立容器与数据目录，2 CPU、2 GiB，数据库独立 cgroup。首次查询 1 的 B 因写回未稳定标记缺测，在新目录延长等待窗口后补测。配对诊断单独使用全命中过滤，64 对查询互换执行顺序，候选数均为 10,000。",
-      "observations": [
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/performance-baseline-20261110/inputs/manifest.json",
-          "source_sha256": "a829533ded72d25aa11b67ab17fc62a5c9cbad27dbe3ab1a0967da66c7aa06bf",
-          "excerpt": "{\r\n  \"seed\": 20261110,\r\n  \"row_count\": 10000,\r\n  \"dimensions\": 128,\r\n  \"grid_scale\": 1024,\r\n  \"content_ascii_bytes\": 64,\r\n  \"category_histogram\": {\r\n    \"c0\": 1000,\r\n    \"c1\": 1000,\r\n    \"c2\": 1000,\r\n    \"c3\": 1000,\r\n    \"c4\": 1000,\r\n    \"c5\": 1000,\r\n    \"c6\": 1000,\r\n    \"c7\": 1000,\r\n    \"c8\": 1000,\r\n    \"c9\": 1000\r\n  },\r\n  \"batch_rows\": 100,\r\n  \"transactions\": 100,\r\n  \"k\": 10,\r\n  \"queries\": 1000,\r\n  \"filtered\": 500,\r\n  \"warmup\": 40,\r\n  \"paired\": 64,\r\n  \"paired_warmup\": 12,\r\n  \"input_files_sha256\": {\r\n    \"index.jsonl\": \"be68a95155f92b09a1459633a90fa70574ccb60293339f6df9205e1410f68ee1\",\r\n    \"paired-load.jsonl\": \"b26a33109b84776173b9840f48a6639a9fd283f52125e6434d17d4994fa731de\",\r\n    \"paired-warmup.jsonl\": \"0b5c11fb9c968d7a590025b7b6a28c9218e48d43a766b7d3f31f1eb4f21570fe\",\r\n    \"paired.jsonl\": \"2fd75771ade8ac0f0a1e74e4ecdff3dc874be0d3b98762fc76b28a58f3178df2\",\r\n    \"queries.txt\": \"7da68d1758a76257002365c8c5aeecebaa7f1c29b381e64cfa54b99085a4eb7f\",\r\n    \"query.jsonl\": \"e3b1e8ec161777379eb41524f67b82477885de88868bb9d3c8eec389dc69d3db\",\r\n    \"rows.txt\": \"51b7618cc8ccfcb6a3088e9e87e5883eeb9c2d9a02e377afe57ab35fc3bc2006\",\r\n    \"schema.jsonl\": \"6fcc7e08f5eef73b9a9bb68ffbb9f885b5b4eb22c90af87c1878fb604043e30e\",\r\n    \"warmup.jsonl\": \"8b7b6e178abfa8ae310005c85033d3c97506e7f075f0eeeab4c690e192e4b6ab\",\r\n    \"write.jsonl\": \"c49d32aa998544ce2c6c804fc4db70a083fa00d793c42bc86a10cd5e2068c383\"\r\n  },\r\n  \"input_sha256\": \"85f54aad7649c5b3ea1cefd2c7d4677dab35e3c3dedf359d68a3f5340645738a\"\r\n}"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/performance-baseline-20261110/run-01/write-1/metrics.json",
-          "source_sha256": "2191837f9b58a48bc5f4d286134a83ed33a91b758d44e83db16628b28ac9a757",
-          "excerpt": "  \"T_ns\": 1950122475,\n  \"timed_requests\": 300,\n    \"B_bytes\": 7077888,\n    \"M_bytes\": 9846784,\n  \"round\": 1,\n  \"kind\": \"write\","
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/performance-baseline-20261110/run-01/write-2/metrics.json",
-          "source_sha256": "8701fab9e3b5be86df19bb5e7b2cef622389ea4dd04f803e6da6581e1b6e682f",
-          "excerpt": "  \"T_ns\": 1910060102,\n  \"timed_requests\": 300,\n    \"B_bytes\": 7077888,\n    \"M_bytes\": 10432512,\n  \"round\": 2,\n  \"kind\": \"write\","
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/performance-baseline-20261110/run-01/write-3/metrics.json",
-          "source_sha256": "f6abf95d714c1247cd4372d9bafca9db1c71fe41553b5a404c9135f453165759",
-          "excerpt": "  \"T_ns\": 1913149151,\n  \"timed_requests\": 300,\n    \"B_bytes\": 7077888,\n    \"M_bytes\": 10444800,\n  \"round\": 3,\n  \"kind\": \"write\","
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/performance-baseline-20261110/run-01/query-1/metrics.json",
-          "source_sha256": "8f77ae17c4bc03fe6073e04ada9406d5fd464a2938b50d0c413ff06af53a0dc1",
-          "excerpt": "  \"T_ns\": 12355319812,\n  \"timed_requests\": 1000,\n    \"B_bytes\": null,\n    \"M_bytes\": 11014144,\n        \"writeback_stable\": false,\n  \"round\": 1,\n  \"kind\": \"query\","
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/performance-baseline-20261110/retry-01/query-1/metrics.json",
-          "source_sha256": "126b49071009a174e035a6c72b3d7eb172fde038ac4627b004c2a097e6a29157",
-          "excerpt": "  \"T_ns\": 16464340468,\n  \"timed_requests\": 1000,\n    \"B_bytes\": 7475200,\n    \"M_bytes\": 11345920,\n  \"round\": 1,\n  \"kind\": \"query\","
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/performance-baseline-20261110/run-01/query-2/metrics.json",
-          "source_sha256": "7f9792478fe14db3a7382e9f28cd48b849e97b9696b8febe166979af1f53eeba",
-          "excerpt": "  \"T_ns\": 12556800607,\n  \"timed_requests\": 1000,\n    \"B_bytes\": 7475200,\n    \"M_bytes\": 10960896,\n  \"round\": 2,\n  \"kind\": \"query\","
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/performance-baseline-20261110/run-01/query-3/metrics.json",
-          "source_sha256": "d182526949c6e0c117a3600263264eae1fb753081eafea2afb58b72ce83a7f17",
-          "excerpt": "  \"T_ns\": 12901153049,\n  \"timed_requests\": 1000,\n    \"B_bytes\": 7475200,\n    \"M_bytes\": 11554816,\n  \"round\": 3,\n  \"kind\": \"query\","
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/performance-baseline-20261110/writeback-gate-repro.json",
-          "source_sha256": "266e499e2d95fa10cf1052a19020cf0822edbffb3e86c1275425235c7bef9a9b",
-          "excerpt": "{\r\n  \"rule\": \"two equal device samples and file_dirty == file_writeback == 0\",\r\n  \"first_attempt_poll_count\": 20,\r\n  \"first_attempt_B\": null,\r\n  \"minimal_recorded_samples\": [\r\n    {\r\n      \"stage\": \"after-sync-0\",\r\n      \"file_dirty\": 790528,\r\n      \"file_writeback\": 0,\r\n      \"device_io\": {\r\n        \"rbytes\": 0,\r\n        \"wbytes\": 7475200,\r\n        \"rios\": 0,\r\n        \"wios\": 210,\r\n        \"dbytes\": 0,\r\n        \"dios\": 0\r\n      }\r\n    },\r\n    {\r\n      \"stage\": \"after-sync-18\",\r\n      \"file_dirty\": 790528,\r\n      \"file_writeback\": 0,\r\n      \"device_io\": {\r\n        \"rbytes\": 0,\r\n        \"wbytes\": 7475200,\r\n        \"rios\": 0,\r\n        \"wios\": 210,\r\n        \"dbytes\": 0,\r\n        \"dios\": 0\r\n      }\r\n    },\r\n    {\r\n      \"stage\": \"after-sync-19\",\r\n      \"file_dirty\": 790528,\r\n      \"file_writeback\": 0,\r\n      \"device_io\": {\r\n        \"rbytes\": 0,\r\n        \"wbytes\": 7475200,\r\n        \"rios\": 0,\r\n        \"wios\": 210,\r\n        \"dbytes\": 0,\r\n        \"dios\": 0\r\n      }\r\n    }\r\n  ],\r\n  \"full_raw_observation\": \"run-01/query-1/resources.json\",\r\n  \"retry_path\": \"retry-01/query-1/resources.json\"\r\n}"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/performance-baseline-20261110/run-01/paired/paired-summary.json",
-          "source_sha256": "c8a840dede86394a1fcb772d8797487bb1d3d366251534e557d65b2a3b94aa33",
-          "excerpt": "{\n  \"passed\": true,\n  \"candidates\": {\n    \"covered\": 10000,\n    \"full_row\": 10000,\n    \"startup_ns\": 276487692,\n    \"container_id\": \"cfc78fe9b9d9a63a5fb9593faa3a96683718972b46e640ca4ad25791ab0a7e74\",\n    \"shutdown_exit_code\": 0\n  },\n  \"pairs\": 64,\n  \"full_row_slower_pairs\": 64,\n  \"overall\": {\n    \"covered_ns\": {\n      \"min\": 14697955,\n      \"median\": 16303254.0,\n      \"p95\": 18790190,\n      \"max\": 19949384\n    },\n    \"full_row_ns\": {\n      \"min\": 19424624,\n      \"median\": 21937800.0,\n      \"p95\": 24261534,\n      \"max\": 25139845\n    },\n    \"delta_ns\": {\n      \"min\": 3701532,\n      \"median\": 5411447.5,\n      \"p95\": 7299202,\n      \"max\": 7986166\n    },\n    \"ratio\": {\n      \"min\": 1.185546180273035,\n      \"median\": 1.326035853978186,\n      \"p95\": 1.4511413759069816,\n      \"max\": 1.5130998030331368\n    }\n  },\n  \"by_order\": {\n    \"covered\": {\n      \"covered_ns\": {\n        \"min\": 14697955,\n        \"median\": 16176165.0,\n        \"p95\": 18790190,\n        \"max\": 18947574\n      },\n      \"full_row_ns\": {\n        \"min\": 19453094,\n        \"median\": 21917796.5,\n        \"p95\": 24416185,\n        \"max\": 25139845\n      },\n      \"delta_ns\": {\n        \"min\": 3886895,\n        \"median\": 5529596.0,\n        \"p95\": 7299202,\n        \"max\": 7398063\n      },\n      \"ratio\": {\n        \"min\": 1.2294850227604872,\n        \"median\": 1.3314627269742516,\n        \"p95\": 1.4511413759069816,\n        \"max\": 1.466121772401177\n      }\n    },\n    \"full_row\": {\n      \"covered_ns\": {\n        \"min\": 15198919,\n        \"median\": 16415514.5,\n        \"p95\": 19812920,\n        \"max\": 19949384\n      },\n      \"full_row_ns\": {\n        \"min\": 19424624,\n        \"median\": 22206805.5,\n        \"p95\": 24261534,\n        \"max\": 24480509\n      },\n      \"delta_ns\": {\n        \"min\": 3701532,\n        \"median\": 5290693.5,\n        \"p95\": 7501273,\n        \"max\": 7986166\n      },\n      \"ratio\": {\n        \"min\": 1.185546180273035,\n        \"median\": 1.3214482890656072,\n        \"p95\": 1.4739457775470088,\n        \"max\": 1.5130998030331368\n      }\n    }\n  }\n}"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/performance-baseline-20261110/verification/summary.json",
-          "source_sha256": "e8db8569664ebcc353b5e2303654cca75a1f91eb8b5b967cee1647b0b7281240",
-          "excerpt": "{\r\n  \"write\": {\r\n    \"write-1\": {\r\n      \"passed\": true,\r\n      \"rows\": 10000,\r\n      \"dimensions\": 128,\r\n      \"check\": \"all columns, after restart\",\r\n      \"startup_ns\": 143683526,\r\n      \"container_id\": \"e676bf69e1e1ec24cc0ce961d8cce679d54d94671bc19cf75b3cab909c478c0e\",\r\n      \"shutdown_exit_code\": 0\r\n    },\r\n    \"write-2\": {\r\n      \"passed\": true,\r\n      \"rows\": 10000,\r\n      \"dimensions\": 128,\r\n      \"check\": \"all columns, after restart\",\r\n      \"startup_ns\": 148971078,\r\n      \"container_id\": \"40af3e3ce5f8924e0a150f5c07df9faaf86e8393861a8e27f1b7c36ea37e7fd0\",\r\n      \"shutdown_exit_code\": 0\r\n    },\r\n    \"write-3\": {\r\n      \"passed\": true,\r\n      \"rows\": 10000,\r\n      \"dimensions\": 128,\r\n      \"check\": \"all columns, after restart\",\r\n      \"startup_ns\": 124782602,\r\n      \"container_id\": \"351aa322ad38cc3d87e969d993cb8f8a3ed31347475cc00d379fce35e44f10b8\",\r\n      \"shutdown_exit_code\": 0\r\n    }\r\n  },\r\n  \"query\": {\r\n    \"query-1\": {\r\n      \"passed\": true,\r\n      \"groups\": {\r\n        \"filtered\": {\r\n          \"queries\": 500,\r\n          \"mean_recall_at_10\": 1.0,\r\n          \"exact_matches\": 500,\r\n          \"max_abs_distance_error\": 0.0,\r\n          \"queries_with_tie_within_top10\": 0\r\n        },\r\n        \"unfiltered\": {\r\n          \"queries\": 500,\r\n          \"mean_recall_at_10\": 1.0,\r\n          \"exact_matches\": 500,\r\n          \"max_abs_distance_error\": 0.0,\r\n          \"queries_with_tie_within_top10\": 0\r\n        }\r\n      },\r\n      \"case\": \"analysis\\\\performance-baseline-20261110\\\\run-01\\\\query-1\"\r\n    },\r\n    \"query-2\": {\r\n      \"passed\": true,\r\n      \"groups\": {\r\n        \"filtered\": {\r\n          \"queries\": 500,\r\n          \"mean_recall_at_10\": 1.0,\r\n          \"exact_matches\": 500,\r\n          \"max_abs_distance_error\": 0.0,\r\n          \"queries_with_tie_within_top10\": 0\r\n        },\r\n        \"unfiltered\": {\r\n          \"queries\": 500,\r\n          \"mean_recall_at_10\": 1.0,\r\n          \"exact_matches\": 500,\r\n          \"max_abs_distance_error\": 0.0,\r\n          \"queries_with_tie_within_top10\": 0\r\n        }\r\n      },\r\n      \"case\": \"analysis\\\\performance-baseline-20261110\\\\run-01\\\\query-2\"\r\n    },\r\n    \"query-3\": {\r\n      \"passed\": true,\r\n      \"groups\": {\r\n        \"filtered\": {\r\n          \"queries\": 500,\r\n          \"mean_recall_at_10\": 1.0,\r\n          \"exact_matches\": 500,\r\n          \"max_abs_distance_error\": 0.0,\r\n          \"queries_with_tie_within_top10\": 0\r\n        },\r\n        \"unfiltered\": {\r\n          \"queries\": 500,\r\n          \"mean_recall_at_10\": 1.0,\r\n          \"exact_matches\": 500,\r\n          \"max_abs_distance_error\": 0.0,\r\n          \"queries_with_tie_within_top10\": 0\r\n        }\r\n      },\r\n      \"case\": \"analysis\\\\performance-baseline-20261110\\\\run-01\\\\query-3\"\r\n    },\r\n    \"query-1-retry\": {\r\n      \"passed\": true,\r\n      \"groups\": {\r\n        \"filtered\": {\r\n          \"queries\": 500,\r\n          \"mean_recall_at_10\": 1.0,\r\n          \"exact_matches\": 500,\r\n          \"max_abs_distance_error\": 0.0,\r\n          \"queries_with_tie_within_top10\": 0\r\n        },\r\n        \"unfiltered\": {\r\n          \"queries\": 500,\r\n          \"mean_recall_at_10\": 1.0,\r\n          \"exact_matches\": 500,\r\n          \"max_abs_distance_error\": 0.0,\r\n          \"queries_with_tie_within_top10\": 0\r\n        }\r\n      },\r\n      \"case\": \"analysis\\\\performance-baseline-20261110\\\\retry-01\\\\query-1\"\r\n    }\r\n  }\r\n}"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/performance-baseline-20261110/raw-sample.txt",
-          "source_sha256": "bac9d19f3fc8f767740fa3ce5f75f012746bc8c8a8be644f8c3c18e5dfc105e8",
-          "excerpt": "query-2 actual JSONL request\n{\"id\": 2000, \"op\": \"execute\", \"sql\": \"SELECT id, L2_DISTANCE(embedding, '[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]') AS distance FROM docs ORDER BY distance LIMIT 10;\", \"search_mode\": \"exact\"}\nquery-2 actual JSONL response\n{\"id\":2000,\"ok\":true,\"columns\":[\"id\",\"distance\"],\"rows\":[[9938,5.517219896418577],[842,5.645268945766157],[1418,5.680716021363932],[7474,5.689042018569585],[4915,5.700516781051076],[7087,5.701901741002759],[926,5.704215585607062],[2794,5.7141705297032654],[8197,5.716249012866708],[6785,5.7234261994038125]]}\nquery-2 final io.stat device row after syncfs (whole run)\n7:2 rbytes=0 wbytes=7475200 rios=0 wios=210 dbytes=0 dios=0\nquery-2 final memory.peak (bytes, whole run)\n10960896"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/performance-baseline-20261110/regression-handshake/stdout.log",
-          "source_sha256": "dae52e223f0c4d733a0ff4dc5875cebd3a348ee1aa771d51b3822104423e04ab",
-          "excerpt": "handshake: PASS \nReport: /workspace/analysis/performance-baseline-20261110/regression-results/handshake/result.json"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/performance-baseline-20261110/regression-public/stdout.log",
-          "source_sha256": "7c43b9ca9b64f516e5f756447488a49ca9bb7eec7146e433fc834bbcbcbfa5ab",
-          "excerpt": "sql_crud: PASS \nsql_comparisons: PASS \nsql_ordering: PASS \nsql_empty: PASS \nsql_primary_key: PASS \nsql_unicode: PASS \nsql_bigint: PASS \nsql_unsupported: PASS \nstorage_restart: PASS \nvector_euclidean: PASS \ntransaction_commit: PASS \ntransaction_rollback: PASS \nstorage_mutations: PASS \nstorage_multiple_tables: PASS \nvector_ties_and_filter: PASS \nvector_float32: PASS \nvector_index_maintenance: PASS \ntransaction_failed_insert: PASS \ntransaction_autocommit_atomic: PASS \ntransaction_shutdown_rollback: PASS \nReport: /workspace/analysis/performance-baseline-20261110/regression-results/public/result.json"
-        },
-        {
-          "source_kind": "tool_output",
-          "source": "analysis/performance-baseline-20261110/regression-legacy/stdout.log",
-          "source_sha256": "24af80f100fd8ffbd256375d1c034899a34f8b012133d289aaa53dd2523a070f",
-          "excerpt": "legacy_filtered_topk: PASS \nlegacy_index_rollback_restart: PASS \nlegacy_failed_index_tx: PASS \nReport: /workspace/analysis/performance-baseline-20261110/regression-results/legacy/result.json"
-        }
-      ]
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/exact-topk-20261110/score.json",
+     "source_sha256": "205c56c49136947becd8b25dd594d4b51cdcc35321e3d690e47313cebe77f30e",
+     "output": "{\"reference_order\":[\"write_T_ms\",\"write_B_MiB\",\"write_M_MiB\",\"query_T_ms\",\"query_B_MiB\",\"query_M_MiB\"],\"reference_values\":[\"1875.783932\",\"6.75\",\"10.0234375\",\"13109.863073\",\"7.12890625\",\"10.17578125\"]}"
     }
-  ],
-  "evidence_index": [
+   ]
+  },
+  {
+   "id": "E02",
+   "title": "把旧场景转成新题 SQL 与独立真值，捕获 float32 双重舍入",
+   "dimension": "技术理解与迁移",
+   "prompt_digest": "在真实 Linux JSONL 数据库上验证旧场景的迁移版本。按新题的存储精度和排序规则计算独立真值，比较真实请求响应；保持过滤、并列、原子性和重启语义。",
+   "context": "旧 seekdb/AMD 流程提供小数据与真值方法。迁移包重写为新题 SQL，包括过滤并列、索引回滚后重启、失败语句原子性。BIGINT 保留整数精度。向量距离以落盘的有限 float32 位值计算。",
+   "execution": "用标准驱动执行额外的三个 SQL 场景，再用独立生成器及精确排序 oracle 检查实际响应。Agent 增加十进制中点附近的测试，并对照从 JSON 十进制先转 float64 再转 float32 的实现。",
+   "output": "失败断言中实际存入 1.0，期望 1.0000001192092896。保留十进制原文后直接舍入到 float32，同一测试通过，9 个 Rust 集成测试通过。正确性基线 93abe64 的镜像通过公开 20/20、迁移 3/3、独立 oracle 144 条以及重启和恢复补测。",
+   "decision": "保留原期望，修正转换路径。旧工具的方法已迁移到真实数据库；测试覆盖的结果按本地公开及补充验证记录。",
+   "sent_prompt_evidence": [
     {
-      "topic": "公开测试更新与性能上界",
-      "context": [
-        "/conversations/0/content",
-        "/conversations/1/content",
-        "/conversations/2/content",
-        "/conversations/4/content"
-      ],
-      "actual_results": [
-        "/experiments/0/observations/0/excerpt"
-      ],
-      "gap": "已核对参赛者的测算要求、版本更新要求和优先级问题。推导、代理运行与结果解读来自 Agent 和工具。"
+     "id": "p00",
+     "pointer": "/conversations/4/content",
+     "excerpt": "- 向量先存为有限 float32，再计算距离；"
     },
     {
-      "topic": "旧测试适配并接入主端",
-      "context": [
-        "/conversations/3/content",
-        "/conversations/5/content",
-        "/conversations/6/content"
-      ],
-      "actual_results": [
-        "/experiments/1/observations/0/excerpt",
-        "/experiments/1/observations/2/excerpt",
-        "/experiments/1/observations/3/excerpt"
-      ],
-      "gap": "已核对参赛者提出迁移要求以及真实数据库的执行结果。测试迁移方法和结果解释来自 Agent。"
+     "id": "p00",
+     "pointer": "/conversations/4/content",
+     "excerpt": "现有迁移包包含3个用例、32条SQL，覆盖过滤与并列、索引事务回滚和提交后重启、失败语句原子性。"
     },
     {
-      "topic": "正确性基线与回归",
-      "context": [
-        "/conversations/8/content",
-        "/conversations/11/content",
-        "/conversations/12/content"
-      ],
-      "actual_results": [
-        "/experiments/2/observations/0/excerpt",
-        "/experiments/2/observations/1/excerpt",
-        "/experiments/3/observations/1/excerpt",
-        "/experiments/3/observations/2/excerpt",
-        "/experiments/4/observations/1/excerpt",
-        "/experiments/4/observations/2/excerpt",
-        "/experiments/4/observations/3/excerpt",
-        "/experiments/4/observations/5/excerpt",
-        "/experiments/5/observations/0/excerpt",
-        "/experiments/5/observations/1/excerpt"
-      ],
-      "gap": "这些摘录来自 Agent 和实际测试工具，保留作后续参赛者核对、质疑或解释结果的上下文。"
-    },
-    {
-      "topic": "真实性能基线、缺测补测与过滤路径配对",
-      "context": [
-        "/conversations/13/content",
-        "/conversations/14/content",
-        "/conversations/15/content",
-        "/conversations/16/content",
-        "/conversations/17/content"
-      ],
-      "actual_results": [
-        "/experiments/6/observations/0/excerpt",
-        "/experiments/6/observations/1/excerpt",
-        "/experiments/6/observations/2/excerpt",
-        "/experiments/6/observations/3/excerpt",
-        "/experiments/6/observations/4/excerpt",
-        "/experiments/6/observations/5/excerpt",
-        "/experiments/6/observations/6/excerpt",
-        "/experiments/6/observations/7/excerpt",
-        "/experiments/6/observations/8/excerpt",
-        "/experiments/6/observations/9/excerpt",
-        "/experiments/6/observations/10/excerpt",
-        "/experiments/6/observations/11/excerpt",
-        "/experiments/6/observations/12/excerpt",
-        "/experiments/6/observations/13/excerpt",
-        "/experiments/6/observations/14/excerpt"
-      ],
-      "gap": "本轮提示词由侧端生成并由参赛者实际发送。实验、结果解释和优化建议来自主端 Agent 与工具。参赛者对读数的后续判断和复测尚待实际记录。"
+     "id": "p00",
+     "pointer": "/conversations/4/content",
+     "excerpt": "使用包内的小型数据生成器和独立 oracle 检查实际数据库结果；离线数据格式不能当作通信协议，reference.json 不能充当数据库输出。该 oracle 的精确计算适合小规模正确性验证，不要直接拿它跑大规模性能测量。"
     }
-  ],
-  "limitations": [
-    "当前为侧端工作稿。已收录主端实际收到的性能基线提示词、执行结果和失败补测记录。",
-    "本地公开、迁移和补充验证仅覆盖所列运行条件。正式功能用例、正式性能基线及 Agent 评审结果以组织方为准。",
-    "参赛者对这些具体读数的解释、据此做出的取舍、调整复测和新情境验证仍需收录真实后续记录。"
+   ],
+   "agent_reply_pointers": [
+    "/conversations/5/content",
+    "/conversations/6/content"
+   ],
+   "raw_results": [
+    {
+     "kind": "原始输出行摘录",
+     "source": "analysis/implementation-20261110/rounding-red/stderr.log",
+     "source_sha256": "a96061a58266ba1bf6bc7635e3ea42cb7fceddeec076c765915660ea5ad058ee",
+     "output": "  left: Array [Array [Array [Number(1.0), Number(0.0)]]]\n right: Array [Array [Array [Number(1.0000001192092896), Number(0.0)]]]"
+    },
+    {
+     "kind": "原始输出行摘录",
+     "source": "analysis/implementation-20261110/rounding-green-02/stdout.log",
+     "source_sha256": "a0c2f48de4bbe288875d9f59aaed174753532f349ae460575941b77eec19e1f0",
+     "output": "test decimal_vector_rounding_does_not_round_through_f64 ... ok\ntest result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s"
+    }
+   ]
+  },
+  {
+   "id": "E03",
+   "title": "设备写回核验与 B 缺测补跑",
+   "dimension": "独立验证与质疑",
+   "prompt_digest": "用完整镜像和单客户端真实 JSONL 建立三轮基线。先证明专用设备写回记账正确，缺测保留原记录，补跑使用新的目录和 cgroup。",
+   "context": "B 取数据设备的物理读写计数，M 取 cgroup memory.peak 并包含页缓存。数据设备归属先以 4 MiB 写与冷读探针核验。",
+   "execution": "第一轮查询虽然 syncfs 成功，但 2 秒窗口内脏页未清空，采集器记录 B 未验证。把后置观察上限延长到约 10 秒，保持写回稳定判据不变，新目录只补跑这轮。",
+   "output": "首次查询 T=12355.319812 ms、M=11014144 字节、B=null，数据设备计数存在但写回不稳定。补跑 B=7475200 字节，T=16464.340 ms，较慢时间保留。三轮最终查询中位 12.901 s、写入 1.913 s，四次实际查询的 4000 条结果精确匹配；原缺测未填零。",
+   "decision": "正式本地比较使用完整轮次及同口径统计。后置资源补测和计时窗口分别保存，结果通过无法替代 B 的实测。",
+   "sent_prompt_evidence": [
+    {
+     "id": "p01",
+     "pointer": "/conversations/7/content",
+     "excerpt": "诊断。拿到可比较的结果后回报，留出一轮根据证据选择实现改动。遇到结果错误、超时或资源采集缺失时，保留实际失败输出和最小复现，继续完成其余可执行检查。\\"
+    },
+    {
+     "id": "p01",
+     "pointer": "/conversations/7/content",
+     "excerpt": "完成条件是交付可重跑的基准入口、三轮写入和查询原始指标、正确性对照及一次查询路径诊断。拿到可比较的结果后回报，留出一轮根据证据选择实现改动。遇到结果错误、超时或资源采集缺失时，保留实际失败输出和最小复现，继续完成其余可执行检查。\\"
+    }
+   ],
+   "agent_reply_pointers": [
+    "/conversations/8/content",
+    "/conversations/9/content"
+   ],
+   "raw_results": [
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/performance-baseline-20261110/run-01/query-1/metrics.json",
+     "source_sha256": "8f77ae17c4bc03fe6073e04ada9406d5fd464a2938b50d0c413ff06af53a0dc1",
+     "output": "{\"T_ns\":12355319812,\"resources\":{\"device\":\"7:2\",\"rbytes\":null,\"wbytes\":null,\"B_bytes\":null,\"M_bytes\":11014144,\"missing_or_unverified\":{\"B\":{\"sync_error\":null,\"writeback_stable\":false,\"dedicated_probe_verified\":true,\"device_counters_present\":true}}}}"
+    },
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/performance-baseline-20261110/retry-01/query-1/metrics.json",
+     "source_sha256": "126b49071009a174e035a6c72b3d7eb172fde038ac4627b004c2a097e6a29157",
+     "output": "{\"T_ns\":16464340468,\"resources\":{\"device\":\"7:2\",\"rbytes\":0,\"wbytes\":7475200,\"B_bytes\":7475200,\"M_bytes\":11345920,\"missing_or_unverified\":{}}}"
+    }
+   ]
+  },
+  {
+   "id": "E04",
+   "title": "根据配对证据选择先过滤，再解码向量",
+   "dimension": "问题理解与自主拆解",
+   "prompt_digest": "用默认混合工作负载验证窄字段过滤。保持可见行、命中数和精确 TopK 语义，先解码等值字段，再为命中行解码向量。",
+   "context": "基线 64 对同数据、同过滤命中数诊断观察到完整行路径配对耗时差中位数 5.411 ms。用户实际据此选择首轮方向。",
+   "execution": "等值合取用窄字段判断。驱动首次因 make_inputs 导入失败，修复导入后在新目录跑 A/B。用相同输入和每轮独立真值核对过滤与无过滤。",
+   "output": "保留 4be3a20。默认查询三对 13.110→11.479、12.787→11.465、13.218→11.987 s。有过滤单条中位 10.855→8.205 ms，查询峰值 M 中位增加 540672 字节，计费 B 各轮相同。",
+   "decision": "收益与少分配、少解码相符。整个 WAL 记录仍被读入，此实验的设备读计数为零，冷读收益未量化。",
+   "sent_prompt_evidence": [
+    {
+     "id": "p02",
+     "pointer": "/conversations/10/content",
+     "excerpt": "**先做窄字段过滤。** 先解码等值谓词所需的字段，再为命中行解码向量。上轮 64 对实验在候选数相同、TopK 结果一致时，完整行路径的配对耗时差中位数为 **5.411 ms**。第一轮用默认混合负载验证实际收益。"
+    }
+   ],
+   "agent_reply_pointers": [
+    "/conversations/11/content"
+   ],
+   "raw_results": [
+    {
+     "kind": "原始输出行摘录",
+     "source": "analysis/narrow-filter-20261110/ab-01/baseline/capture-write-1/stderr.log",
+     "source_sha256": "00ed06ea744172a1cd637fa3499b21424408f1b57b9431bfed7e7a2a9497fa97",
+     "output": "ModuleNotFoundError: No module named 'make_inputs'"
+    },
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/narrow-filter-20261110/summary/summary.json",
+     "source_sha256": "6a7dc066b61cd66a13c917e244eaaf3099dbc35775ff323b3c2acc0850e74490",
+     "output": "{\"median\":{\"baseline\":{\"write\":{\"T_ns\":1875783932,\"B_bytes\":7077888,\"M_bytes\":10510336},\"query\":{\"T_ns\":13109863073,\"B_bytes\":7475200,\"M_bytes\":10670080,\"latency\":{\"filtered\":{\"median_ns\":10855368.0,\"p95_ns\":12693371,\"sum_ns\":5530459226},\"unfiltered\":{\"median_ns\":15020520.5,\"p95_ns\":16710334,\"sum_ns\":7577992880}}}},\"candidate\":{\"write\":{\"T_ns\":1843613037,\"B_bytes\":7077888,\"M_bytes\":10579968},\"query\":{\"T_ns\":11478849708,\"B_bytes\":7475200,\"M_bytes\":11210752,\"latency\":{\"filtered\":{\"median_ns\":8204529.0,\"p95_ns\":9497519,\"sum_ns\":4143017436},\"unfiltered\":{\"median_ns\":14633679.5,\"p95_ns\":15896969,\"sum_ns\":7334394773}}}}}}"
+    }
+   ]
+  },
+  {
+   "id": "E05",
+   "title": "拆测精确距离成本，验证整数快路径的边界",
+   "dimension": "独立验证与质疑",
+   "prompt_digest": "把逐行读取、分配与精确距离算术拆开，只优化证据支持的一项；保留精确顺序和并列语义，检查极端有限 float32 和并列，再做三对完整 A/B。",
+   "context": "同一个 A 及相同向量读取，两条 SQL 分别按精确距离和主键排序。两者均输出距离，主键排序只为最终 10 条算距离。内存探针用于交叉核对。",
+   "execution": "3000×128、96 对测量全部是距离排序更慢，三个块的配对差中位数约 2.92–3.04 ms。对指数差 1–7 的值对齐尾数后精确平方，超范围继续原算法。人为将允许差扩到 8 验证反例。",
+   "output": "变异测试中主键 6 错排到首位，原预期顺序为 5、4、6；限制差值为 7 后回归通过。9b357a7 三对查询分别减少 8.69%、9.62%、7.26%，本地 E 中位 0.501147→0.504166。第一对 E 有下降，写入 T 中位上升 2.51%。",
+   "decision": "采用小范围精确核，并保留超界回退。差值 8 的失败来自主动变异对照。",
+   "sent_prompt_evidence": [
+    {
+     "id": "p03",
+     "pointer": "/conversations/12/content",
+     "excerpt": "从第 1 轮保留的窄字段过滤版本出发，区分精确距离计算与逐行读取、解码和分配的成本。本轮选择其中一项，交付最小候选、正确性结果和三对端到端 A/B。收益不足或回归时，保留当前版本并交付测量结果。"
+    },
+    {
+     "id": "p03",
+     "pointer": "/conversations/12/content",
+     "excerpt": "1. **先拆开成本。** 追踪 `src/query.rs` 的 `BoundExpr::distance`、`sort_value`，`src/distance.rs` 的 `SquaredL2::between`，以及 `src/storage.rs` 的 `VectorView::read_at`。用实际镜像的小规模重复诊断，区分已在内存中的精确距离计算和正常扫描路径开销。可用采样或独立对照程序，诊断开销与正"
+    }
+   ],
+   "agent_reply_pointers": [
+    "/conversations/13/content"
+   ],
+   "raw_results": [
+    {
+     "kind": "原始输出行摘录",
+     "source": "analysis/exact-topk-20261110/rejected-gap8-release/stdout.log",
+     "source_sha256": "1638968bd802d280a54cfa2caee00395f55079ac875325e59bb3c9c9a248ec69",
+     "output": "test exact_topk_preserves_subnormal_differences_and_alignment_boundary ... FAILED\n  left: Array [Array [Number(6), Number(379992693.1086352)], Array [Number(5), Number(2164260735.0)], Array [Number(4), Number(4278189825.0)]]\n right: Array [Array [Number(5), Number(2164260735.0)], Array [Number(4), Number(4278189825.0)], Array [Number(6), Number(4311744255.0)]]"
+    },
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/exact-topk-20261110/score.json",
+     "source_sha256": "205c56c49136947becd8b25dd594d4b51cdcc35321e3d690e47313cebe77f30e",
+     "output": "{\"arms\":{\"baseline\":{\"round_e\":[\"0.50114714636303331206895175128940075588080435667248\",\"0.49614001374606856984470532545627305581211019460427\",\"0.50246039346223352995278450308499087114220744975608\"],\"median_e\":\"0.50114714636303331206895175128940075588080435667248\",\"median_e_6\":\"0.501147\"},\"candidate\":{\"round_e\":[\"0.50103319838133257278048937015734102427863584667579\",\"0.50416602836486278117806716630576796214648817234565\",\"0.50719580935002738311236581158343977510271444589736\"],\"median_e\":\"0.50416602836486278117806716630576796214648817234565\",\"median_e_6\":\"0.504166\"}}}"
+    }
+   ]
+  },
+  {
+   "id": "E06",
+   "title": "WAL 偏移重排、回跳反例与宽记录迁移",
+   "dimension": "实验与反馈迭代",
+   "prompt_digest": "复放真实 WAL 偏移，先辨别小读取、随机定位和用户态字节的代价，再实现有预算的批处理。通过回跳、稀疏宽记录、事务和恢复，才比较端到端净收益。",
+   "context": "WAL 中实际相邻偏移差中位约 1.63 MiB。向量读取重放用最多 4096 个偏移重排和 8 KiB 缓冲，小读取次数 10000→1955，用户态读量增约 3.06 倍。",
+   "execution": "首版在缓冲耗尽后从底层读取，回跳测试暴露旧逻辑偏移。将限制读长放回 BufReader 的同一状态机。补测稀疏 32 KiB 正文，避免为远端行触发持续预读。",
+   "output": "首版回跳实际字节 142…149，期望 158…165。修复后 305140b 三对查询 10.923→7.658 s（中位），本地 E 0.518273→0.549480，B 不变、查询 M 增 10.39%。32 KiB 正文单对总耗时约增 3.0%，自适应保护使两端读取字节一致。",
+   "decision": "保留修复版 B。默认负载收益来自少定位和少小读，宽正文对照说明稀疏场景的收益边界。",
+   "sent_prompt_evidence": [
+    {
+     "id": "p04",
+     "pointer": "/conversations/14/content",
+     "excerpt": "按调查模式执行，建议使用高推理强度。本轮在第二轮精确距离核之上，降低查询扫描逐行定位和读取的成本，交付一个有界的候选及三对真实镜像 A/B。完成条件为正确性全过、六项资源完整、混合查询收益超过预先记录的波动且本地 E 中位数提高。若不满足条件，保留 A 并回传候选和诊断结果。"
+    },
+    {
+     "id": "p04",
+     "pointer": "/conversations/14/content",
+     "excerpt": "询扫描逐行定位和读取的成本，交付一个有界的候选及三对真实镜像 A/B。完成条件为正确性全过、六项资源完整、混合查询收益超过预先记录的波动且本地 E 中位数提高。若不满足条件，保留 A 并回传候选和诊断结果。"
+    }
+   ],
+   "agent_reply_pointers": [
+    "/conversations/15/content",
+    "/conversations/16/content"
+   ],
+   "raw_results": [
+    {
+     "kind": "原始输出行摘录",
+     "source": "analysis/wal-read-20261110/backward-seek-red/stdout.log",
+     "source_sha256": "d0ef1c32ca0289c12e6c6727a4f94dc30a2fc04fb0bb5ec2d5c9957f54012e0b",
+     "output": "test read_batch::tests::backward_seek_after_sparse_read_uses_the_logical_position ... FAILED\n  left: [142, 143, 144, 145, 146, 147, 148, 149]\n right: [158, 159, 160, 161, 162, 163, 164, 165]"
+    },
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/wal-read-20261110/score.json",
+     "source_sha256": "25cc0cda5c172d670ca5878fa51a06060254ba3afc0a3ce3f64109b2c9285593",
+     "output": "{\"arms\":{\"baseline\":{\"round_e\":[\"0.51827253863966371687068062467681094101502422199040\",\"0.51571197047403860855177168636726749118756261830913\",\"0.51984582715685493130775865842818822647353560344219\"],\"median_e\":\"0.51827253863966371687068062467681094101502422199040\",\"median_e_6\":\"0.518273\"},\"candidate\":{\"round_e\":[\"0.54804807530631978056754232538553579277264100461303\",\"0.55241235343984250644497137870485694491243058231061\",\"0.54948012006492850813724975520216902191418892888703\"],\"median_e\":\"0.54948012006492850813724975520216902191418892888703\",\"median_e_6\":\"0.549480\"}},\"gate\":{\"fresh_a_query_relative_span\":0.022138384189684602,\"minimum_pair_reduction\":0.05,\"paired_query_reductions\":[0.2995624420136843,0.2973428476860518,0.28342480006600135],\"all_pairs_exceed_noise\":true,\"median_e_increased\":true,\"default_correctness_and_resources_complete\":true,\"performance_and_default_correctness_passed\":true,\"additional_correctness_required\":\"Rust, handshake, public, legacy and independent alternate-seed oracle\"}}"
+    }
+   ]
+  },
+  {
+   "id": "E07",
+   "title": "亚秒目标驱动连续快照与可证明的精确筛选",
+   "dimension": "技术理解与迁移",
+   "prompt_digest": "先从本地 seekdb 与 GitHub 检索候选，按规则筛选后迁移布局和分派方法。在 8 MiB 总预算内构建连续快照，严格保留可能进入 TopK 的候选并做精确复核。完整镜像以每轮低于 1 秒和 E 净收益验收。",
+   "context": "参考 seekdb 的运行时 SIMD 分派、Faiss 的连续扫描、DuckDB 的选择位置，自行实现。float64 直接平方和的保守区间用第 K 小上界筛选；候选下界等于阈值时仍复核，最终按精确距离和主键排序。",
+   "execution": "侧端独立探针固定输入，预载后扫描 5290.934→305.569 ms，1000 条 ID 与独立真值一致，另核对 193 条边界。主端分离连续数据、标量筛选、AVX 与直接输出小结果四阶段。缓存建造、事务、失效和超预算回退均保留实际验证。",
+   "output": "同一阶段诊断为 7.644→6.102→1.278 s（原版、连续数据、加筛选）。最终 1d7494c 三轮完整查询 1.067930、1.136454、1.031600 s，本地 E 0.541116→0.651425，B 各轮一致，查询峰值 M 中位增加约 4.98 MiB。6000 条 TopK、六次写入重启及两组 Recall=1.000 通过。",
+   "decision": "采用 E 净提升版。亚秒达标 0/3；内核与直连用于归因，仍以完整 JSONL 时间验收。",
+   "sent_prompt_evidence": [
+    {
+     "id": "q05",
+     "pointer": "/conversations/17/content",
+     "excerpt": "目前已有35/40得分队伍查询时间在1秒以内，说明远没有达到目标期望。重新查看是否有可以迁移的seekdb文件或者github开源优化，需要找到一个可以尽快提高e值到趋近1的方案"
+    },
+    {
+     "id": "q06",
+     "pointer": "/conversations/18/content",
+     "excerpt": "趋近1的本地理论基线值，去github搜索已有方案查看是否可以内容或者方法迁移，需要先搜索资源在做筛选。"
+    },
+    {
+     "id": "p05",
+     "pointer": "/conversations/19/content",
+     "excerpt": "目标是在当前保留版上实现跨查询复用的有界连续热数据，并接入有误差界的浮点筛选与精确复核。默认 10,000×128、1,000 次混合 K=10 的完整 JSONL 查询目标为每轮低于 1 秒，正确性全过且六项合成本地 E 提高。完成时交付三对完整 A/B 和已验证的采用版本。若未达到亚秒，继续拆分剩余固定成本与扫描成本，给出实际瓶颈及可验证的下一步，按当前结果报告目标完成程度。"
+    },
+    {
+     "id": "p05",
+     "pointer": "/conversations/19/content",
+     "excerpt": "oat32 扩展为 float64，直接计算多累加器平方距离及保守上下界。维护 K 个最小上界，取第 K 小上界 U，只对下界不大于 U 的所有候选运行现有 `SquaredL2` 与主键排序，再按原方式输出欧氏距离。复核报告中的误差证明和 `probe.rs` 的前提、维度限制及端点向外舍入。边界不确定时执行精确回退。首先接入可移植标量多累加器版本，根据实际剖析再做 CPU 特性分派。固定多取若干名的启发式须经过精"
+    }
+   ],
+   "agent_reply_pointers": [
+    "/conversations/21/content"
+   ],
+   "raw_results": [
+    {
+     "kind": "原始输出行摘录",
+     "source": "analysis/hot-scan-20261110/run-01/stdout.log",
+     "source_sha256": "af47387e7abcde9ed316b0e9c5b5e26596c6da0226d61d86f0f3d47974847e8d",
+     "output": "{\"boundary_queries\":193,\"passed\":true}\n{\"round\":2,\"refined\":true,\"query_ms\":305.568636,\"exact_refinements\":10000,\"passed\":true}\n{\"round\":2,\"refined\":false,\"query_ms\":5290.934075,\"exact_refinements\":5500000,\"passed\":true}"
+    },
+    {
+     "kind": "原始文件文本",
+     "source": "analysis/hot-cache-20261110/raw-sample-short.txt",
+     "source_sha256": "222f0e054800fd071856bb8bfbd09135991c48761f418dca687d0268d0288f28",
+     "output": "{\"id\": 2000, \"op\": \"execute\", \"sql\": \"SELECT id, L2_DISTANCE(embedding, '[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]') AS distance FROM docs ORDER BY distance LIMIT 10;\", \"search_mode\": \"exact\"}\n{\"id\":2000,\"ok\":true,\"columns\":[\"id\",\"distance\"],\"rows\":[[9938,5.517219896418577],[842,5.645268945766157],[1418,5.680716021363932],[7474,5.689042018569585],[4915,5.700516781051076],[7087,5.701901741002759],[926,5.704215585607062],[2794,5.7141705297032654],[8197,5.716249012866708],[6785,5.7234261994038125]]}\nio.stat after-sync-9\n7:14 rbytes=0 wbytes=7475200 rios=0 wios=210 dbytes=0 dios=0\nmemory.peak\n16171008"
+    },
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/hot-cache-20261110/adoption.json",
+     "source_sha256": "a613989e5d702524a13b662130411aac0b46269d98283c1fd8772e6150b513a3",
+     "output": "{\"formal_query_responses_checked\":6000,\"local_e_median_A\":\"0.541116\",\"local_e_median_B\":\"0.651425\",\"candidate_query_T_ns\":[1067930159,1136454289,1031600352],\"subsecond_target_met\":false}"
+    }
+   ]
+  },
+  {
+   "id": "E08",
+   "title": "同二进制测请求往返，过滤位置表未过综合门槛",
+   "dimension": "取舍与反思",
+   "prompt_digest": "同一二进制先交替跑 LIMIT 0 和完整查询，同时记录附着与直连。在有过滤收益时试有界位置表，保持正式 E 口径与事前门槛。",
+   "context": "LIMIT 0 请求仍经过 JSONL 读写、解析和调度，直连诊断的驱动与数据库处于同一 cgroup，因此单列。",
+   "execution": "A 的容器附着 LIMIT 0 / 完整混合中位数 824.973 / 997.996 ms；直连为 92.516 / 267.120 ms。独立候选使用已有预算内的等值位置表，额外检查构建与无过滤成本。",
+   "output": "467930f 查询三对均快 6.88%、16.85%、2.71%，成对 E 增益中位 +0.001935 低于冻结门槛 0.006464，查询 M 中位增加 286720 字节。两个版本均 0/3 亚秒，6000 条 TopK 与两组 Recall=1.000。",
+   "decision": "保留 1d7494c，并把下一轮转向写入暂存。控制查询只用于理解成本，E 继续使用原始墙钟。",
+   "sent_prompt_evidence": [
+    {
+     "id": "p06",
+     "pointer": "/conversations/22/content",
+     "excerpt": "先用同一二进制、同一冻结驱动和相同准备条件，交替复测 LIMIT 0 与完整查询。记录逐请求墙钟、数据库 CPU 和响应字节数。LIMIT 0 用于归因，完整查询时间按原始墙钟报告。直连管道和容器附着分别记录，本地 E 的主 A/B 沿用上一轮口径。"
+    },
+    {
+     "id": "p06",
+     "pointer": "/conversations/22/content",
+     "excerpt": "整查询。记录逐请求墙钟、数据库 CPU 和响应字节数。LIMIT 0 用于归因，完整查询时间按原始墙钟报告。直连管道和容器附着分别记录，本地 E 的主 A/B 沿用上一轮口径。"
+    },
+    {
+     "id": "q08",
+     "pointer": "/conversations/28/content",
+     "excerpt": "191-b859-6b69e2cd62a4)的上一轮对话只整理到记忆或者知识库，评价上一轮是否有明显收益，如果没有列出5-6个可以优化的方向，然后根据前面收集的资料选出一个可以持续优化的方向给第6轮提示词"
+    }
+   ],
+   "agent_reply_pointers": [
+    "/conversations/23/content"
+   ],
+   "raw_results": [
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/ipc-filter-20261110/adoption.json",
+     "source_sha256": "af2203ee6623b03b3bc78a649670fc85f31a614ca11d59006a22677980c0b927",
+     "output": "{\"resource_runs\":12,\"topk_checked\":{\"filtered\":3000,\"unfiltered\":3000},\"median_local_e\":{\"baseline\":\"0.643979\",\"candidate\":\"0.648032\"},\"median_paired_e_delta\":\"0.001934654491012589179581854602\",\"subsecond_rounds\":{\"baseline\":0,\"candidate\":0},\"candidate_adopted\":false}"
+    }
+   ]
+  },
+  {
+   "id": "E09",
+   "title": "空事务接管首条语句，比较阶段收益与净收益",
+   "dimension": "技术理解与迁移",
+   "prompt_digest": "结合 SQLite 的内存暂存思路与本地 seekdb 日志缓冲，先拆 BEGIN、INSERT、COMMIT，再让空显式事务接管首条成功语句的完整暂存对象。验证失败原子性、读己之写、回滚及恢复，以完整 E 决定采用。",
+   "context": "复读原始请求得到每批一条 100 行 INSERT，按编码布局为 62700 字节，每层暂存累计 6270000 逻辑字节。此前实测设备写入 7077888 字节，未把临时文件的逻辑量当成实际 B。",
+   "execution": "d3cee19 省掉空事务首次成功语句进入事务暂存时的解码、重新编码及重复索引更新；已有变更走原合并。附着/直连总写入 1.844/0.483 s；短测、三对完整 A/B、补两对慢值核对分别保存。",
+   "output": "短测数据库 CPU 中位配对下降 13.77%，正式写入 T 配对中位下降 6.26%，但成对 E 增益中位 0.004413 未达 0.008570，亚秒 A/B 为 2/3 与 1/3。补测未复现慢查询，原正式样本仍保留。",
+   "decision": "保留 1d7494c。暂存复用的局部收益成立，整轮综合门槛未达；直连 B 的 COMMIT 仍占总写入约 65%。",
+   "sent_prompt_evidence": [
+    {
+     "id": "q07",
+     "pointer": "/conversations/20/content",
+     "excerpt": "继续搜索，github和本地可以迁移"
+    },
+    {
+     "id": "q09",
+     "pointer": "/conversations/31/content",
+     "excerpt": "是否利用了迁移报告"
+    },
+    {
+     "id": "p07",
+     "pointer": "/conversations/29/content",
+     "excerpt": "镜像和固定输入拆测 BEGIN、INSERT、COMMIT，再单独验证空显式事务接管首条成功语句的完整暂存对象。覆盖失败语句原子性、已有待提交变更、读己之写、回滚、重启和强杀恢复。"
+    },
+    {
+     "id": "p07",
+     "pointer": "/conversations/29/content",
+     "excerpt": "显示可复现收益后，再做三对同口径 A/B，逐轮计算六项 T/B/M 和本地 E。若综合收益未超过本轮 A/A 波动，保留 A，并交付阶段耗时、候选结果和剩余瓶颈。"
+    }
+   ],
+   "agent_reply_pointers": [
+    "/conversations/30/content",
+    "/conversations/32/content"
+   ],
+   "raw_results": [
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/migration-followup-20261110/write-stage-probe.json",
+     "source_sha256": "af91c97bd9564d3481504127771750b3c05f5d93f7182fa9f1e860771f1232d3",
+     "output": "{\"logical_payload_per_batch_bytes_range\":[62700,62700],\"logical_payload_per_staging_layer_bytes\":6270000}"
+    },
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/write-stage-20261111/adoption.json",
+     "source_sha256": "82ec3cb5081289258849585a8e896c07e1cc8a333da1354626185e7c044c6c2c",
+     "output": "{\"resource_runs\":12,\"median_local_e\":{\"baseline\":\"0.653797\",\"candidate\":\"0.656063\"},\"median_paired_e_delta\":\"0.004413051697191637094520370116\",\"subsecond_rounds\":{\"baseline\":2,\"candidate\":1},\"candidate_adopted\":false}"
+    }
+   ]
+  },
+  {
+   "id": "E10",
+   "title": "提交同步的归因、候选拒绝与错误恢复",
+   "dimension": "实验与反馈迭代",
+   "prompt_digest": "固定镜像及输入，分解 WAL 追加、同步、回放和外部往返；依据阶段结果选择一个提交改动，并用短测门槛、强杀与旧 WAL 恢复决定后续。",
+   "context": "A 的 100 笔缓冲诊断中，追加/同步/回放累计为附着 13.468/325.108/29.415 ms、直连 9.842/289.091/25.398 ms。同步占内部时间约 88%–89%。",
+   "execution": "7c45ac8 只在 Linux 非空提交将 sync_all 替为 sync_data。目录同步、截尾和确认顺序保持。检查追加或同步 EIO、强杀及旧 WAL。",
+   "output": "COMMIT 累计墙钟三对均升，配对中位 +2.13%，在 4.00% A/A 波动内；物理 I/O 持平。追加/同步注入错误都没有成功回包，追加中断留下的 528 字节尾部重启被截掉，默认真值和六个强杀时点通过。",
+   "decision": "短测未达到进入条件，保留 A。该轮只报告短测，没有完整写入与查询三对 E。",
+   "sent_prompt_evidence": [
+    {
+     "id": "p08",
+     "pointer": "/conversations/33/content",
+     "excerpt": "先用同一镜像和固定输入，分别测量 WAL 追加、同步等待、索引回放和外部 COMMIT 往返。根据耗时只选一项改动，保留每个非空事务的持久化确认顺序，并验证强杀恢复与旧 WAL 兼容。"
+    },
+    {
+     "id": "p08",
+     "pointer": "/conversations/33/content",
+     "excerpt": "待、索引回放和外部 COMMIT 往返。根据耗时只选一项改动，保留每个非空事务的持久化确认顺序，并验证强杀恢复与旧 WAL 兼容。"
+    },
+    {
+     "id": "p08",
+     "pointer": "/conversations/33/content",
+     "excerpt": "短测收益超过 A/A 波动后，再做三对同口径 A/B，逐轮计算六项 T/B/M 和本地 E。若综合收益未超过预先冻结的门槛，保留 A，交付阶段耗时、候选结果和剩余瓶颈。"
+    }
+   ],
+   "agent_reply_pointers": [
+    "/conversations/34/content"
+   ],
+   "raw_results": [
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/commit-path-20261111/short-score.json",
+     "source_sha256": "41e0e8448222ec9c32ac9ee60341f39ed5eb96eab8d11202a0964883049fe202",
+     "output": "{\"median_paired_decreases\":{\"T_ns\":-0.01145220396521296,\"CPU_ns\":-0.005315005912288173,\"B_bytes\":0.0,\"M_bytes\":-0.050906286155032676,\"COMMIT_sum_ns\":-0.02125807711533234},\"guards\":{\"T_ns\":true,\"B_bytes\":true,\"M_bytes\":true},\"proceed_to_full_ab\":false}"
+    },
+    {
+     "kind": "原始文件文本",
+     "source": "analysis/commit-path-20261111/raw-sample-short.txt",
+     "source_sha256": "aa3b760d49aa1bf500408d95f7bade21013ebf6640c1bce41af597312fd4dcdb",
+     "output": "{\"id\": 12, \"op\": \"execute\", \"sql\": \"COMMIT;\", \"search_mode\": \"exact\"}\r\n{\"id\":12,\"ok\":true}\r\nio.stat after-sync-19.io.stat\r\n7:13 rbytes=0 wbytes=7077888 rios=0 wios=208 dbytes=0 dios=0\r\nmemory.peak\r\n10977280"
+    }
+   ]
+  },
+  {
+   "id": "E11",
+   "title": "把无损向量编码从独立探针迁入 WAL，验证反例与升级边界",
+   "dimension": "技术理解与迁移",
+   "prompt_digest": "复测不同数据的压缩率和编解码成本，只在能按 float32 位模式精确恢复且有空间收益时启用。保留回退、混合 WAL、旧数据恢复和强杀验证，用完整六项确认净效果。",
+   "context": "侧端参考 Parquet ALP 的分块决策及本地 seekdb 紧凑表示，独立实现二进制共享尺度与基值差值位打包。网格逐行编码 5120000→1870000 字节，随机有限位模式全回退。生产版另测编解码，并按节省门槛选择格式。",
+   "execution": "a3fe0f7 保留旧 tag 2 并增加可逐位复原的 tag 3。负零、系数超限、节省不足 1/8 或解码预算超出时仍写 tag 2。真实镜像验证旧 WAL、混合提交、冷扫描、强杀及非网格。",
+   "output": "网格代理写/查物理 B 每对下降 46.47%/44.00%，查询墙钟配对中位上升 4.23%；本地 E 0.650986→0.684829，成对增益中位 0.033129 高于 0.016099。非网格 10000 行全部回退且四份 WAL 字节相同，混合 WAL 重启、逐位真值和坏记录拒绝通过。",
+   "decision": "采用 a3fe0f7。升级版能读旧 WAL；旧二进制遇 tag 3 明确拒绝，实验保留了旧格式副本。压缩收益依赖数据分布。",
+   "sent_prompt_evidence": [
+    {
+     "id": "p09",
+     "pointer": "/conversations/35/content",
+     "excerpt": "先复核迁移报告中的无损编码探针，比较网格、一般 float32 和随机位模式的压缩率及编解码成本。若具备可行性，基于 A 在独立工作树实现按向量自适应的无损存储；对不安全或不划算的数据回退原始格式，不依赖固定维度、数据分布或评测输入。"
+    },
+    {
+     "id": "p09",
+     "pointer": "/conversations/35/content",
+     "excerpt": "可行性，基于 A 在独立工作树实现按向量自适应的无损存储；对不安全或不划算的数据回退原始格式，不依赖固定维度、数据分布或评测输入。"
+    },
+    {
+     "id": "p09",
+     "pointer": "/conversations/35/content",
+     "excerpt": "保持事务持久化、精确查询和恢复语义，验证旧 WAL 读取、新旧记录混合重启、强杀恢复及特殊浮点位模式。基础正确性通过后，按预先冻结的 A/A 波动门槛完成三对同口径端到端 A/B，逐轮记录六项 T/B/M 和本地 E，并补充非网格数据对照。"
+    }
+   ],
+   "agent_reply_pointers": [
+    "/conversations/36/content"
+   ],
+   "raw_results": [
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/lossless-wal-20261111/adoption.json",
+     "source_sha256": "f55ddc026b3b5da0ca8cb1be56719726730f359af6ceb6c139192f3da8377a12",
+     "output": "{\"local_e_median\":{\"baseline\":\"0.65098597962550353729852470758272982611659440481803\",\"candidate\":\"0.68482927826407426771096055868098123735304572892252\"},\"paired_e_median_gain\":\"0.03312948857732917713655042102\",\"min_paired_e_gain_exclusive\":\"0.01609865815723957855861916887\",\"backward_read_old_wal\":true,\"old_binary_can_read_new_packed_wal\":false,\"nongrid_requests_checked\":480}"
+    },
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/lossless-wal-20261111/mixed-contract/result.json",
+     "source_sha256": "b33bce9193b4f91b0414ff4c26534ee7f9701358dd40b27bff89d84ce4cddf7e",
+     "output": "{\"passed\":true,\"old_wal_read_by_candidate\":true,\"mixed_restart_passed\":true,\"old_mixed_format_exit_code\":1,\"checksum_error_exit_code\":1,\"bit_exact_rows\":4,\"acknowledged_rows_after_sigkill\":151}"
+    }
+   ]
+  },
+  {
+   "id": "E12",
+   "title": "紧凑热快照在不同硬件能力下的拒收和复测",
+   "dimension": "取舍与反思",
+   "prompt_digest": "先核对参照与二进制身份，只在可逐位还原时使用 16 位热快照。首轮收益低于门槛时保留样本，再独立做九对交叉 A/B 和 AVX/F16C 屏蔽，针对可复现回退开销做最小修复。",
+   "context": "WAL 编码已在前轮落地，本链改变内存布局。网格快照载荷从 5.12 MB 降至 2.56 MB；混合输入 5019/10000 可紧凑存储，非网格全部回退。原候选不修改 WAL 格式。",
+   "execution": "第 9 轮 70211e6 查询 M 降 23.00%，E 配对中位增 0.008442 未过 0.019659，保留 A。第 10 轮 B 九对 E 全正，但屏蔽 F16C 后两对墙钟增约 76%/72%。C f4742c3 在能力不足时改用连续 float32；九对 E 全正，纯标量第二对仍达 1.815434 s / 560.138 ms CPU，因此暂缓。",
+   "output": "第 11 轮同一 C 独立复测 12 对，正常、仅禁 F16C、纯标量的 C/A 查询 T 比为 0.950、1.025、1.023，CPU 比 0.806、1.013、0.986。三种模式过事前护栏。结合原九对 E 配对中位 +0.009452、查询 M 下降 23.88%，采用 C。九轮最快约 1.018 s，仍为 0/9 亚秒。",
+   "decision": "保留旧慢值与各轮当时决定。正式 E 仅沿用已核对的同一 C release；新能力诊断不当作新增计分轮。实际无 AVX 硬件及宿主频率未测。",
+   "sent_prompt_evidence": [
+    {
+     "id": "p10",
+     "pointer": "/conversations/37/content",
+     "excerpt": "及侧端的无损 16 位表示探针。若具备可行性，在独立工作树实现自适应紧凑热快照：只有能逐位还原原 float32 的向量才使用紧凑表示，其他数据保留原样回退。比较构建、筛选和精确复核成本，保持过滤、并列排序、投影和事务语义。"
+    },
+    {
+     "id": "p10",
+     "pointer": "/conversations/37/content",
+     "excerpt": "注意旧 run_ab.ps1 和 score_round8.py 的基线仍固定为 1d7494c：请独立适配包装，核对 A/A 两臂及 A/B 的提交、镜像和二进制指纹，确保本轮基线确为 a3fe0f7。根据正确性、完整六项和预先冻结的噪声门槛决定保留版本；收益不明确时保留 A，并记录证据和下一方向。"
+    },
+    {
+     "id": "p11",
+     "pointer": "/conversations/39/content",
+     "excerpt": "本轮主要检查候选是否在至少 8/9 对中取得正的成对 E 增益，并结合预先登记的资源护栏和正确性作出判断。统计结论须说明样本和环境限制，不代表正式平台成绩。"
+    },
+    {
+     "id": "p12",
+     "pointer": "/conversations/43/content",
+     "excerpt": "C 三种情况。记录查询墙钟、数据库 CPU、逐百条延迟、资源及可取得的宿主状态，判断纯标量慢值是否可复现。"
+    },
+    {
+     "id": "q12",
+     "pointer": "/conversations/46/content",
+     "excerpt": "为什么仍为0/9"
+    }
+   ],
+   "agent_reply_pointers": [
+    "/conversations/38/content",
+    "/conversations/40/content",
+    "/conversations/41/content",
+    "/conversations/44/content",
+    "/conversations/47/content"
+   ],
+   "raw_results": [
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/compact-hot-20261111/adoption.json",
+     "source_sha256": "a749b15e4accf54a5c34345fb57bf443f793d28374af90034501cd9a99ef81be",
+     "output": "{\"median_e\":{\"baseline\":\"0.68474443098640366749720860878428182036410339615539\",\"candidate\":\"0.69318623111188508323582108665970581834016418012033\"},\"paired_e_median_gain\":\"0.008441800125481415738612477875\",\"min_paired_e_gain_exclusive\":\"0.01965867247971214119360076414\",\"candidate_adopted\":false}"
+    },
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/compact-retest-20261111/adoption.json",
+     "source_sha256": "5a1bdaced69213ccf89ac6a1b79660e0e46f37a83e191afb4e6ff65c4013499c",
+     "output": "{\"reason\":\"C did not clear all of the predeclared checks\",\"b_result\":{\"correctness\":true,\"performance_passed\":true,\"requires_fallback\":true,\"positive_e_pairs\":9,\"nominal_sign_p\":0.00390625,\"paired_e_median_gain\":\"0.007200306772124819006952826123\",\"median_e\":{\"baseline\":\"0.68577002020916095556578359509345988878511583960372\",\"candidate\":\"0.69406093777839975580563872302614341426363466908912\"},\"subsecond_rounds\":{\"baseline\":1,\"candidate\":0}},\"c_result\":{\"correctness\":true,\"performance_passed\":true,\"positive_e_pairs\":9,\"nominal_sign_p\":0.00390625,\"paired_e_median_gain\":\"0.009452418805857722671910627387\",\"median_e\":{\"baseline\":\"0.67836726976092118458549625004696260053210501011065\",\"candidate\":\"0.69103883784768168508724452946879887137323066300717\"},\"subsecond_rounds\":{\"baseline\":0,\"candidate\":0},\"disabled_parity\":{\"no-f16c\":true,\"scalar\":false},\"source_archive_sha256\":\"57627c90d7cc49dfdf2f4d157ffbd993bc3598e4a018742eca89659268d1f09a\"}}"
+    },
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/scalar-fallback-20261111/adoption.json",
+     "source_sha256": "141be2b11f48af24e258240618d98b265425c887cdcb28d008c9fff4ef2a67f9",
+     "output": "{\"fresh_diagnostic_pairs\":12,\"fresh_diagnostic_topk_exact\":24000,\"formal_source\":\"round 10 A/C; exact C release identity reverified\",\"hardware_modes\":{\"enabled\":{\"median_ratios\":{\"query_ns\":0.9495380446643077,\"cpu_us\":0.8058806476947452,\"M\":0.8195062860136197,\"B\":1.0},\"joint_passes\":4,\"passed\":true},\"no-f16c\":{\"median_ratios\":{\"query_ns\":1.024643525409081,\"cpu_us\":1.013262791269036,\"M\":0.9863512283894449,\"B\":1.0},\"joint_passes\":3,\"passed\":true},\"scalar\":{\"median_ratios\":{\"query_ns\":1.022826012580182,\"cpu_us\":0.9861680842327105,\"M\":0.9743343395207319,\"B\":1.0},\"joint_passes\":3,\"passed\":true}},\"formal_subsecond_rounds\":{\"baseline\":0,\"candidate\":0}}"
+    }
+   ]
+  },
+  {
+   "id": "E13",
+   "title": "有误差证明的单精度筛选，内核提速仍拒收",
+   "dimension": "独立验证与质疑",
+   "prompt_digest": "分开测建快照、筛选、精确复核与完整往返。只在数值域与硬件满足条件时试单精度筛选，覆盖近并列和极值，再以真实完整 A/B 决定。",
+   "context": "对纯 binary16 快照使用 AVX/F16C 单精度 SIMD；保守区间重叠全部精确复核。混合、原始、极值和硬件不满足走已验收路径。",
+   "execution": "内核探针 147.686→119.755 ms，精确复核 10000→10010，独立真值全部一致。63586 个区间用整数真值校验。原 A/A 第三对与宿主编译重叠，保留该轮与冻结门槛，另做串行 A/A 作为事后诊断。",
+   "output": "27a8b66 正式三对查询 CPU 降 10.6%–16.2%，完整墙钟仅 1/3 对更快。本地 E 中位 0.695415→0.693751，亚秒均 1/3，两组 Recall=1.0。原正式候选未取得端到端净收益。",
+   "decision": "继续保留 f4742c3。计算核的时间、串行事后 A/A 和容器完整墙钟是不同观测，各按原口径解释。",
+   "sent_prompt_evidence": [
+    {
+     "id": "p13",
+     "pointer": "/conversations/48/content",
+     "excerpt": "y16 热快照上验证 AVX/F16C 单精度 SIMD 筛选，并为实际计算路径推导保守误差区间。区间重叠、并列或数值超界时走现有精确复核或回退路径，保证 TopK 结果和顺序一致。"
+    },
+    {
+     "id": "p13",
+     "pointer": "/conversations/48/content",
+     "excerpt": "及亚秒轮数。覆盖极值、近并列、混合快照、硬件回退、事务和恢复。只有在正确性通过且端到端收益可复现时才采用候选，否则保留 f4742c3，并记录实测结果。"
+    },
+    {
+     "id": "q13",
+     "pointer": "/conversations/50/content",
+     "excerpt": "记录第12轮，给出13轮提示词。上一轮收益，当前e值，当前方向进度，如果没有明显收益分析原因。另外这个版本sql准入优化是否完成。"
+    }
+   ],
+   "agent_reply_pointers": [
+    "/conversations/49/content"
+   ],
+   "raw_results": [
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/f32-screen-20261111/interval-verification.json",
+     "source_sha256": "0b767b016746fa20b3e1037f15e3221ca0ed1252ecb6ec08da797ca437559488",
+     "output": "{\"passed\":true,\"accepted_exact_integer_intervals\":63586,\"rejected_queries\":6,\"seed\":120011}"
+    },
+    {
+     "kind": "原始输出行摘录",
+     "source": "analysis/f32-screen-20261111/probe-result.jsonl",
+     "source_sha256": "233c9629f07e45ffd04f8a59e26edd41a813977ced048885f033732fd67561da",
+     "output": "{\"round\":2,\"refined\":true,\"query_ms\":122.219387,\"exact_refinements\":10010,\"passed\":true}\n{\"round\":2,\"refined\":false,\"query_ms\":147.68627,\"exact_refinements\":10000,\"passed\":true}"
+    },
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/f32-screen-20261111/adoption.json",
+     "source_sha256": "6701ffaab89815bfa9365d354b576f2d3ca5d0c884cbc3d3ab44b98260f6ed01",
+     "output": "{\"adopt_candidate\":false,\"reason\":\"Repeated CPU reduction did not produce repeatable attached end-to-end gain; median local E declined, only 1/3 query pairs faster and 1/3 E differences positive.\"}"
+    }
+   ]
+  },
+  {
+   "id": "E14",
+   "title": "把准入排查推进到 ready 之前，再迁移修复到保留版",
+   "dimension": "问题理解与自主拆解",
+   "prompt_digest": "基于给出的旧失败提交及文档定位启动或 SQL 原因。用真实镜像复现 root 私有目录权限，再把必要的包装修复迁入最新保留版，验证 ready、SQL、提交、强杀、重启及旧数据目录。",
+   "context": "用户提供旧提交简写 387d1b549445ef，报告官方 SQL 准入失败，实际平台容器日志未取得。独立线程先测试旧镜像，再在当时优化版建立 2d3182a 包装修复。",
+   "execution": "原 UID 10001 启动遇 root 所有的 0700 /data，在 ready 前失败。第 13 轮从 f4742c3 实际复现后，迁移运行包装至 2a7173d，二进制与起点一致；最终 826a159 复测相同私有挂载、普通挂载、旧 UID 数据和恢复。",
+   "output": "失败标准错误 io_error: Permission denied (os error 13)。修复版同 0700 目录发出 ready，BEGIN/INSERT/COMMIT 确认后再写一条未提交记录。强杀重启只返回已确认的 [1,5.0]，正常重启仅有 ID 1。旧数据使用 --user 10001:10001 恢复通过。",
+   "decision": "本地复现定位到包装层，可解释同类启动失败；平台原始失败原因和正式准入仍待回执。按新包装与旧数据场景分别验证。",
+   "sent_prompt_evidence": [
+    {
+     "id": "q14",
+     "pointer": "/conversations/24/content",
+     "excerpt": "SQL准入失败，官方给出的信息有限，需要严格按照文档修复一个版本"
+    },
+    {
+     "id": "q15",
+     "pointer": "/conversations/25/content",
+     "excerpt": "387d1b549445ef"
+    },
+    {
+     "id": "q16",
+     "pointer": "/conversations/26/content",
+     "excerpt": "找出未通过原因，并且在最新优化的版本上修复即可"
+    },
+    {
+     "id": "p14",
+     "pointer": "/conversations/51/content",
+     "excerpt": "先用当前真实镜像复现 root 拥有的 0700 /data 挂载问题，再迁移历史 2d3182a 的必要包装修复，验证 ready、SQL、确认提交、强杀和重启。随后补齐 19 行×7 MiB 宽文本的字符串排序、并列和投影测试；若在 96 MiB 下失败，定位归并键及复制的内存成本，完成有界修复。"
+    }
+   ],
+   "agent_reply_pointers": [
+    "/conversations/27/content",
+    "/conversations/52/content"
+   ],
+   "raw_results": [
+    {
+     "kind": "原始文件文本",
+     "source": "analysis/sql-admission-20261111/before-bind/stderr.log",
+     "source_sha256": "881dd9adebcc133ea551cd2c93137fb6093c39f331df53446a83f6b846e1cf55",
+     "output": "io_error: Permission denied (os error 13)"
+    },
+    {
+     "kind": "原始文件文本",
+     "source": "analysis/sql-admission-round13-20261111/bind-before/transcript.jsonl",
+     "source_sha256": "c56ef090e8a10b2b48f15104c368442784e871616d9fad58c33628090e5f320e",
+     "output": "{\"data_uid\": 0, \"data_mode\": \"0o700\"}\n{\"passed\": false, \"error\": \"database exited before response\"}"
+    },
+    {
+     "kind": "原始文件文本",
+     "source": "analysis/sql-admission-round13-20261111/bind-700/transcript.jsonl",
+     "source_sha256": "a0cd066864cb2b729b14f75d16d2130e783209fecac1a307004c43db0676a692",
+     "output": "{\"data_uid\": 0, \"data_mode\": \"0o700\"}\n{\"ready\": true, \"runtime_user\": \"0:0\", \"read_only_root\": true, \"cap_drop\": [\"ALL\"]}\n{\"sql\": \"CREATE TABLE t (id BIGINT PRIMARY KEY, v VECTOR(2));\", \"response\": {\"id\": 1, \"ok\": true}}\n{\"sql\": \"BEGIN;\", \"response\": {\"id\": 2, \"ok\": true}}\n{\"sql\": \"INSERT INTO t VALUES (1,'[3,4]');\", \"response\": {\"id\": 3, \"ok\": true, \"affected_rows\": 1}}\n{\"sql\": \"COMMIT;\", \"response\": {\"id\": 4, \"ok\": true}}\n{\"sql\": \"BEGIN;\", \"response\": {\"id\": 5, \"ok\": true}}\n{\"sql\": \"INSERT INTO t VALUES (2,'[0,0]');\", \"response\": {\"id\": 6, \"ok\": true, \"affected_rows\": 1}}\n{\"after_crash\": {\"id\": 7, \"ok\": true, \"columns\": [\"id\", \"distance\"], \"rows\": [[1, 5.0]]}}\n{\"after_restart\": {\"id\": 9, \"ok\": true, \"columns\": [\"id\"], \"rows\": [[1]]}}\n{\"passed\": true}"
+    }
+   ]
+  },
+  {
+   "id": "E15",
+   "title": "超内存排序从宽正文扩展到宽排序键",
+   "dimension": "实验与反馈迭代",
+   "prompt_digest": "先验证超内存数据的流式查询。再用 19 行×7 MiB 的 VARCHAR 排序键测试真实 96 MiB 镜像，用同包装对照拆开启动权限和归并内存两个故障，并覆盖并列、投影与窄转宽。",
+   "context": "基线初版宽正文场景在 16×7 MiB、按 id 取一行时触发 OOM，改保留键和行位置后通过。后续 ORDER BY 宽 VARCHAR 时即使只存键，多个归并头同时保留也可能超限。",
+   "execution": "第 13 轮原版与仅改包装的同二进制对照在 19×7 MiB 下都以 137/OOM 退出。按观察到的最宽键为归并头预算计算 2–16 路，投影前释放键，另以 15 个窄键后接 18 个宽键复测已累计的归并层。",
+   "output": "826a159 同输入通过，断言排序、并列、降序 LIMIT、投影和重启结果；窄转宽 33 行也通过。含文件页缓存的峰值仍为 96 MiB，匿名内存采样峰值约 49.7 MiB，修复版未观测 OOM。36 Rust、公开 20/20、迁移 3/3、混合 WAL、六个强杀时点及 96 MiB/192 MiB 正文通过。",
+   "decision": "以功能修复采用最终版本。至少两路归并仍需持有两个键，极宽单键、多表达式与编码瞬时占用继续受行宽约束。",
+   "sent_prompt_evidence": [
+    {
+     "id": "p00",
+     "pointer": "/conversations/4/content",
+     "excerpt": "- 数据超过内存预算时存在分页或流式处理路径。"
+    },
+    {
+     "id": "p14",
+     "pointer": "/conversations/51/content",
+     "excerpt": "2a 的必要包装修复，验证 ready、SQL、确认提交、强杀和重启。随后补齐 19 行×7 MiB 宽文本的字符串排序、并列和投影测试；若在 96 MiB 下失败，定位归并键及复制的内存成本，完成有界修复。"
+    },
+    {
+     "id": "p14",
+     "pointer": "/conversations/51/content",
+     "excerpt": "行×7 MiB 宽文本的字符串排序、并列和投影测试；若在 96 MiB 下失败，定位归并键及复制的内存成本，完成有界修复。"
+    }
+   ],
+   "agent_reply_pointers": [
+    "/conversations/6/content",
+    "/conversations/52/content"
+   ],
+   "raw_results": [
+    {
+     "kind": "原始输出行摘录",
+     "source": "analysis/sql-admission-round13-20261111/wide-wrapper-before/final-inspect.json",
+     "source_sha256": "75fb7c41f81ed68c7ee255770b4eeaf9c6e24d22bd24c0dbe6d28082db7d5155",
+     "output": "            \"OOMKilled\": true,\n            \"ExitCode\": 137,"
+    },
+    {
+     "kind": "原始文件文本",
+     "source": "analysis/sql-admission-round13-20261111/wide-standard-r2/result.json",
+     "source_sha256": "5b4e6d2c2d82c9037c6c5159ded39817b2b53310355a51f2cac6f42fc4550966",
+     "output": "{\n  \"passed\": true,\n  \"failure\": null,\n  \"rows\": 19,\n  \"row_text_bytes\": 7340032,\n  \"logical_text_bytes\": 139460608,\n  \"expected_ascending_ids\": [\n    1,\n    3,\n    5,\n    7,\n    9,\n    11,\n    13,\n    15,\n    17,\n    19,\n    2,\n    4,\n    6,\n    8,\n    10,\n    12,\n    14,\n    16,\n    18\n  ],\n  \"peak_bytes\": 100663296,\n  \"driver_outside_db_cgroup\": true\n}"
+    },
+    {
+     "kind": "原始文件文本",
+     "source": "analysis/sql-admission-round13-20261111/wide-transition-r2/result.json",
+     "source_sha256": "7e343e5557123043ea016b50d989856ee51c77f7a20d927743b9ba163abacc48",
+     "output": "{\n  \"passed\": true,\n  \"failure\": null,\n  \"rows\": 33,\n  \"row_text_bytes\": 7340032,\n  \"logical_text_bytes\": 132182061,\n  \"expected_ascending_ids\": [\n    1,\n    2,\n    3,\n    4,\n    5,\n    6,\n    7,\n    8,\n    9,\n    10,\n    11,\n    12,\n    13,\n    14,\n    15,\n    17,\n    19,\n    21,\n    23,\n    25,\n    27,\n    29,\n    31,\n    33,\n    16,\n    18,\n    20,\n    22,\n    24,\n    26,\n    28,\n    30,\n    32\n  ],\n  \"peak_bytes\": 100663296,\n  \"driver_outside_db_cgroup\": true\n}"
+    }
+   ]
+  },
+  {
+   "id": "E16",
+   "title": "以实际写回为依据合并派生索引，并验证稀疏冷路径",
+   "dimension": "取舍与反思",
+   "prompt_digest": "先用真实镜像量化向量位置表的设备写入、内存与冷查询代价。收益可测时试同一派生索引保存行和向量位置，复跑准入边界和独立真值，再按 A/A 门槛与六项指标决定采用。",
+   "context": "早期迁移调研参考 Bitcask 的主键到位置表。本轮从 826a159 出发，仅尝试合并可从 WAL 重建的派生索引。",
+   "execution": "每次建索引写回后减少 393216 字节。另测删除 99% 行后的冷覆盖查询，以检查扫描墓碑的成本。六对按 AB、BA 交替采集，驱动只支持轮号 1–3，后半另用新设备目录，保留拒绝日志和顺序。",
+   "output": "稀疏冷覆盖 p50 成对中位比 1.128，增加 0.129 ms，低于 0.25 ms 绝对护栏。六对查询 B 均减少 393216 字节，但 ΔE 仅 3/6 为正，配对中位 −0.000598，未超过 A/A 的 0.007520。两臂 E 中位 0.684358/0.684670，亚秒均 0/6。",
+   "decision": "保留 826a159。候选 fde3c43 的设备收益可复现，查询耗时与配对 E 未过预登记采用条件。",
+   "sent_prompt_evidence": [
+    {
+     "id": "p15",
+     "pointer": "/conversations/53/content",
+     "excerpt": "先用真实镜像验证建向量索引时第二张主键位置表带来的实际设备写入、"
+    },
+    {
+     "id": "p15",
+     "pointer": "/conversations/53/content",
+     "excerpt": "cgroup 内存和冷路径开销。确认有可测收益后，在独立工作树试用同一个"
+    },
+    {
+     "id": "p15",
+     "pointer": "/conversations/53/content",
+     "excerpt": "本地 E、亚秒次数和冷路径耗时。按预先写下的采用条件作决定。"
+    }
+   ],
+   "agent_reply_pointers": [
+    "/conversations/54/content"
+   ],
+   "raw_results": [
+    {
+     "kind": "原始 JSON 字段摘录，数值保持不变",
+     "source": "analysis/derived-index-round14-20261111/adoption.json",
+     "source_sha256": "1073f5b3e23eb1e856d8a8464be56e7fc7c0f1e2dc7e761e0f2fc9366cb672c0",
+     "output": "{\"adopted\":false,\"failed_adoption_conditions\":[\"query_T\",\"positive_pairs\",\"E_gain_above_noise\"],\"AA\":{\"median_abs_E_noise\":\"0.007520106001299656617713465509\",\"paired_E_deltas\":[\"0.003339785927677862207824416267\",\"-0.008223015468046001946642040391\",\"0.007520106001299656617713465509\"]},\"AB\":{\"E_median\":{\"baseline\":\"0.6843580989473414112273961385\",\"candidate\":\"0.6846702333872875046214924735\"},\"paired_E_deltas\":[\"-0.001513075554571945286929105391\",\"0.01677432645002551789836465640\",\"0.004446226259769331056368802066\",\"-0.005682999504965289098076925042\",\"0.0003179735086041469511379248646\",\"-0.002489634080258758516729569072\"],\"median_paired_E_gain\":\"-0.000597551022983899167895590263\",\"subsecond\":{\"baseline\":0,\"candidate\":0},\"paired_query_B_saved_bytes\":[\"393216.0000000\",\"393216.0000000\",\"393216.0000000\",\"393216.0000000\",\"393216.0000000\",\"393216.0000000\"],\"gates\":{\"regression\":true,\"cold\":true,\"query_B_all\":true,\"write_B\":true,\"memory\":true,\"write_T\":true,\"query_T\":false,\"positive_pairs\":false,\"arm_medians\":true,\"E_gain_above_noise\":false}}}"
+    }
+   ]
+  }
+ ],
+ "final_implementation": {
+  "tested_code_commit": "826a1594b6802c904ab888f4c042d9097aac3fe2",
+  "linux_amd64_binary_sha256": "bd0e46306ab91192aaa6b918e843b7b733a2612c8ddca4902c717c99fc2ed272",
+  "image": "minivectordb:sql-admission-20261111-r1",
+  "setup": "第 13 轮同包装本地对照。A 为 2a7173d 的 root 包装对照，B 为保留版。三对采集与独立真值均完成。",
+  "output": "每行按 轮、臂、写T(ms)、写B(MiB)、写M(MiB)、查询T(ms)、查询B(MiB)、查询M(MiB)、查询CPU(ms)、E 排列。\n|1|A|1940.898468|3.613281|7.796875|1103.530337|3.992188|10.058594|222.583000|0.695705320|\n|1|B|2080.500192|3.613281|7.601562|1073.868372|3.992188|10.601562|225.282000|0.691781460|\n|2|A|2041.681641|3.613281|7.660156|1171.407107|3.992188|10.863281|235.460000|0.689341430|\n|2|B|2080.750944|3.613281|7.011719|1017.822717|3.992188|11.308594|218.541000|0.692432634|\n|3|A|2022.183315|3.613281|7.382812|1316.762274|3.992188|10.640625|264.924000|0.687286097|\n|3|B|2019.495532|3.613281|6.750000|1301.096014|3.992188|9.765625|268.033000|0.691628464|",
+  "summary": "本地 E 中位 A=0.689341、B=0.691781。B 查询严格亚秒为 0/3。B 3000 条 TopK 与三次重启的 30000 行字段一致，两组 Recall@10 均 1.0。采用依据是可复现的功能修复。",
+  "public_case_results": [
+   {
+    "kind": "原始 JSON 字段摘录，数值保持不变",
+    "source": "analysis/sql-admission-round13-20261111/checks/public-results/result.json",
+    "source_sha256": "fca39444de52d9eadff0335a752c72ba92bbc4746a3ab307d05d4e43aaa567c4",
+    "output": "{\"scope\":\"public-protocol-check\",\"passed\":true,\"cases\":[{\"id\":\"sql_crud\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":565},{\"id\":\"sql_comparisons\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":488},{\"id\":\"sql_ordering\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":561},{\"id\":\"sql_empty\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":555},{\"id\":\"sql_primary_key\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":571},{\"id\":\"sql_unicode\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":513},{\"id\":\"sql_bigint\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":575},{\"id\":\"sql_unsupported\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":523},{\"id\":\"storage_restart\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":952},{\"id\":\"vector_euclidean\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":579},{\"id\":\"transaction_commit\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":486},{\"id\":\"transaction_rollback\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":498},{\"id\":\"storage_mutations\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":868},{\"id\":\"storage_multiple_tables\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":879},{\"id\":\"vector_ties_and_filter\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":510},{\"id\":\"vector_float32\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":499},{\"id\":\"vector_index_maintenance\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":885},{\"id\":\"transaction_failed_insert\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":870},{\"id\":\"transaction_autocommit_atomic\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":857},{\"id\":\"transaction_shutdown_rollback\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":957}]}"
+   },
+   {
+    "kind": "原始 JSON 字段摘录，数值保持不变",
+    "source": "analysis/sql-admission-round13-20261111/checks/legacy-results/result.json",
+    "source_sha256": "c201193ff234cec124ded96b75da38289355848927bd8d2cd4c4d368f2f4a112",
+    "output": "{\"scope\":\"public-protocol-check\",\"passed\":true,\"cases\":[{\"id\":\"legacy_filtered_topk\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":539},{\"id\":\"legacy_index_rollback_restart\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":827},{\"id\":\"legacy_failed_index_tx\",\"status\":\"PASS\",\"message\":\"\",\"duration_ms\":902}]}"
+   }
   ]
+ },
+ "limitations": [
+  "正式六项基线、隐藏 SQL、正式 E 与 Agent 评审结果以平台回执为准。已知用户报告旧提交准入失败，未获得其评测容器日志。",
+  "没有独立用户解释的环节只记录已发任务、Agent 执行与证据。go、进度请求、未发送草稿和无实测结果的后续提议不计作新的实验闭环。",
+  "代理数据的压缩率、直连延迟和能力屏蔽诊断用于解释边界。没有把本地结果写成平台成绩。"
+ ]
 }
