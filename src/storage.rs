@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::commit_block::{self, Block, RestoredRow};
 use crate::disk_index::{DiskIndex, Entries, Entry};
 use crate::read_batch::{OffsetBatch, WalRead};
 use crate::types::{DataType, Schema, Value};
@@ -15,6 +16,8 @@ use crate::{Error, Result};
 pub(crate) type Catalog = BTreeMap<String, Schema>;
 const HEADER: &[u8; 8] = b"MVTX0001";
 const COMMIT: &[u8; 8] = b"COMMIT01";
+const BLOCK_HEADER: &[u8; 8] = b"MVTX0002";
+const BLOCK_COMMIT: &[u8; 8] = b"COMMIT02";
 const FNV: u64 = 0xcbf2_9ce4_8422_2325;
 fn checksum(mut hash: u64, buf: &[u8]) -> u64 {
     for b in buf {
@@ -145,6 +148,86 @@ fn read_body(r: &mut impl Read, data: &mut Vec<u8>) -> Result<bool> {
     data.resize(len, 0);
     r.read_exact(data)?;
     Ok(true)
+}
+
+/// Derived index positions keep physical byte offsets for legacy rows. A compact
+/// position reserves the high bit and stores a block offset plus a row ordinal.
+#[derive(Clone, Copy)]
+struct BlockPosition {
+    start: u64,
+    row: usize,
+}
+
+impl BlockPosition {
+    const FLAG: u64 = 1 << 63;
+    const ROW_BITS: u32 = 16;
+    const MAX_START: u64 = (Self::FLAG - 1) >> Self::ROW_BITS;
+
+    fn unpack(offset: u64) -> Option<Self> {
+        (offset & Self::FLAG != 0).then_some(Self {
+            start: (offset & !Self::FLAG) >> Self::ROW_BITS,
+            row: (offset & u64::from(u16::MAX)) as usize,
+        })
+    }
+
+    fn pack(self) -> Result<u64> {
+        if self.start > Self::MAX_START || self.row > usize::from(u16::MAX) {
+            return Err(corrupt("compact row position exceeds format limit"));
+        }
+        Ok(Self::FLAG | (self.start << Self::ROW_BITS) | self.row as u64)
+    }
+
+    fn vector_at(self, row: &RestoredRow) -> Option<u64> {
+        row.vector_at.map(|at| self.start + 4 + at as u64)
+    }
+}
+
+#[derive(Default)]
+struct BlockReader {
+    start: Option<u64>,
+    body: Vec<u8>,
+    expanded: Vec<u8>,
+}
+
+impl BlockReader {
+    fn load(&mut self, file: &mut (impl Read + Seek), start: u64) -> Result<()> {
+        if self.start != Some(start) {
+            self.start = None;
+            file.seek(SeekFrom::Start(start))?;
+            let size = u32read(file)? as usize;
+            if size == 0 || size > commit_block::TARGET_BYTES {
+                return Err(corrupt("compact block size exceeds read limit"));
+            }
+            if self.body.capacity() == 0 {
+                self.body = Vec::with_capacity(commit_block::TARGET_BYTES);
+            }
+            self.body.resize(size, 0);
+            file.read_exact(&mut self.body)?;
+            self.start = Some(start);
+        }
+        Ok(())
+    }
+
+    fn restore(
+        &mut self,
+        file: &mut (impl Read + Seek),
+        location: BlockPosition,
+        out: &mut [u8],
+    ) -> Result<RestoredRow> {
+        self.load(file, location.start)?;
+        Block::parse(&self.body)?.restore(location.row, out)
+    }
+
+    fn read(
+        &mut self,
+        file: &mut (impl Read + Seek),
+        location: BlockPosition,
+    ) -> Result<(&[u8], RestoredRow)> {
+        self.load(file, location.start)?;
+        self.expanded.resize(commit_block::TARGET_BYTES, 0);
+        let row = Block::parse(&self.body)?.restore(location.row, &mut self.expanded)?;
+        Ok((&self.expanded[..row.len], row))
+    }
 }
 
 pub(crate) enum Field<'a> {
@@ -446,7 +529,7 @@ impl Store {
     pub fn get(&mut self, table: &str, key: i64) -> Result<Option<Entry>> {
         self.indexes.get_mut(table).map_or(Ok(None), |x| x.get(key))
     }
-    fn apply(&mut self, record: &Record, offset: u64) -> Result<()> {
+    fn apply(&mut self, record: &Record, offset: u64, vector_at: Option<u64>) -> Result<()> {
         match &record.op {
             Op::Schema(schema) => {
                 if !self.indexes.contains_key(&schema.name) {
@@ -473,10 +556,7 @@ impl Store {
                     let vector = if deleted {
                         0
                     } else {
-                        offset
-                            + record
-                                .vector_at
-                                .ok_or_else(|| corrupt("indexed row has no vector"))?
+                        vector_at.ok_or_else(|| corrupt("indexed row has no vector"))?
                     };
                     index.put(Entry {
                         key: *key,
@@ -492,35 +572,96 @@ impl Store {
         // A flat index points directly into committed binary vector payloads.
         // It can be rebuilt from the same row versions as the primary index.
         let mut index = DiskIndex::create(self.temp("vectors"))?;
-        let mut log = File::open(&self.path)?;
-        for slot in self.indexes[table].entries()? {
+        let mut log = WalRead::Direct(File::open(&self.path)?).buffered();
+        let mut blocks = BlockReader::default();
+        let mut slots = OffsetBatch::new(self.indexes[table].entries()?).ordered();
+        while let Some(slot) = slots.next() {
             let slot = slot?;
             if slot.deleted {
                 continue;
             }
-            log.seek(SeekFrom::Start(slot.offset))?;
-            let vector_at = read_record(&mut log)?
-                .and_then(|record| record.vector_at)
-                .ok_or_else(|| corrupt("indexed row has no vector"))?;
+            let vector_at = if let Some(location) = BlockPosition::unpack(slot.offset) {
+                let (_, row) = blocks.read(&mut log, location)?;
+                location.vector_at(&row)
+            } else {
+                log.prefetch(slots.nearby(slot.offset));
+                log.seek(SeekFrom::Start(slot.offset))?;
+                read_record(&mut log)?
+                    .and_then(|record| record.vector_at)
+                    .map(|at| slot.offset + at)
+            }
+            .ok_or_else(|| corrupt("indexed row has no vector"))?;
             index.put(Entry {
-                offset: slot.offset + vector_at,
+                offset: vector_at,
                 ..slot
             })?;
         }
         self.vectors.insert(table.to_owned(), index);
         Ok(())
     }
-    fn replay(&mut self, start: u64, len: u64) -> Result<()> {
+    fn replay(&mut self, start: u64, len: u64, compact: bool) -> Result<()> {
         let mut file = BufReader::new(File::open(&self.path)?);
         file.seek(SeekFrom::Start(start))?;
         let end = start + len;
-        while file.stream_position()? < end {
-            let offset = file.stream_position()?;
-            let record = read_record(&mut file)?.ok_or_else(|| corrupt("missing operation"))?;
-            if file.stream_position()? > end {
+        let mut offset = start;
+        let mut body = Vec::new();
+        let mut expanded = Vec::new();
+        while offset < end {
+            if end - offset < 4 {
                 return Err(corrupt("operation crosses commit boundary"));
             }
-            self.apply(&record, offset)?;
+            let size = u32read(&mut file)?;
+            if u64::from(size) > end - offset - 4 {
+                return Err(corrupt("operation crosses commit boundary"));
+            }
+            let next = offset + 4 + u64::from(size);
+            if compact && size as usize > commit_block::MAX_INPUT_BYTES {
+                return Err(corrupt("record exceeds compact commit limit"));
+            }
+            body.resize(size as usize, 0);
+            file.read_exact(&mut body)?;
+            if compact && body.first() == Some(&commit_block::TAG) {
+                let block = Block::parse(&body)?;
+                let schema = self
+                    .catalog
+                    .get(block.table()?)
+                    .filter(|schema| block.matches_schema(schema))
+                    .ok_or_else(|| corrupt("commit block layout differs from table"))?;
+                let vector = schema
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, column)| {
+                        if let DataType::Vector(dim) = column.kind {
+                            Some((index, dim))
+                        } else {
+                            None
+                        }
+                    });
+                expanded.resize(commit_block::TARGET_BYTES, 0);
+                let mut expanded_bytes = 0;
+                for row in 0..block.len() {
+                    let location = BlockPosition { start: offset, row };
+                    let decoded = block.restore(row, &mut expanded)?;
+                    expanded_bytes += 4 + decoded.len;
+                    if expanded_bytes > commit_block::TARGET_BYTES {
+                        return Err(corrupt("expanded commit block exceeds limit"));
+                    }
+                    let record = decode_record(&expanded[..decoded.len])?;
+                    if let Some((index, dim)) = vector
+                        && let Op::Put { row, .. } = &record.op
+                        && !matches!(&row[index], Value::Vector(values)
+                            if values.len() == dim && values.iter().all(|value| value.is_finite()))
+                    {
+                        return Err(corrupt("commit block vector differs from table"));
+                    }
+                    self.apply(&record, location.pack()?, location.vector_at(&decoded))?;
+                }
+            } else {
+                let record = decode_record(&body)?;
+                self.apply(&record, offset, record.vector_at.map(|at| offset + at))?;
+            }
+            offset = next;
         }
         Ok(())
     }
@@ -533,15 +674,20 @@ impl Store {
             reader.seek(SeekFrom::Start(pos))?;
             let mut header = [0; 16];
             reader.read_exact(&mut header)?;
-            if &header[..8] != HEADER {
-                return Err(corrupt("invalid commit header"));
-            }
+            let compact = match &header[..8] {
+                bytes if bytes == HEADER => false,
+                bytes if bytes == BLOCK_HEADER => true,
+                _ => return Err(corrupt("invalid commit header")),
+            };
             let len = u64::from_le_bytes(header[8..16].try_into().unwrap());
             let Some(end) = pos.checked_add(32).and_then(|p| p.checked_add(len)) else {
                 return Err(corrupt("commit length overflow"));
             };
             if end > size {
                 break;
+            }
+            if compact && len > commit_block::MAX_INPUT_BYTES as u64 {
+                return Err(corrupt("compact commit exceeds format limit"));
             }
             let mut left = len;
             let mut hash = FNV;
@@ -553,11 +699,12 @@ impl Store {
             }
             let mut footer = [0; 16];
             reader.read_exact(&mut footer)?;
-            if &footer[..8] != COMMIT || u64::from_le_bytes(footer[8..].try_into().unwrap()) != hash
+            let marker = if compact { BLOCK_COMMIT } else { COMMIT };
+            if &footer[..8] != marker || u64::from_le_bytes(footer[8..].try_into().unwrap()) != hash
             {
                 return Err(corrupt("committed frame checksum mismatch"));
             }
-            self.replay(pos + 16, len)?;
+            self.replay(pos + 16, len, compact)?;
             pos = end;
         }
         if pos != size {
@@ -568,29 +715,52 @@ impl Store {
         Ok(())
     }
     pub fn commit(&mut self, changes: &Changes) -> Result<()> {
-        let len = changes.file.metadata()?.len();
+        let mut len = changes.file.metadata()?.len();
         if len == 0 {
             return Ok(());
         }
         let pos = self.wal.seek(SeekFrom::End(0))?;
-        self.wal.write_all(HEADER)?;
-        self.wal.write_all(&len.to_le_bytes())?;
         let mut reader = File::open(&changes.path)?;
-        let mut buffer = [0; 65536];
-        let mut hash = FNV;
-        loop {
-            let n = reader.read(&mut buffer)?;
-            if n == 0 {
-                break;
+        // Small transactions can be examined in one bounded window. Large
+        // transactions and wide rows retain the streaming legacy writer.
+        let mut compact = false;
+        let hash = if len <= commit_block::MAX_INPUT_BYTES as u64
+            && pos <= BlockPosition::MAX_START - (len + 32)
+        {
+            let mut input = vec![0; len as usize];
+            reader.read_exact(&mut input)?;
+            let payload = commit_block::pack_payload(&input, |table| {
+                changes.catalog.get(table).map(|schema| schema.primary)
+            })?;
+            compact = payload.is_some();
+            let payload = payload.unwrap_or(input);
+            len = payload.len() as u64;
+            self.wal
+                .write_all(if compact { BLOCK_HEADER } else { HEADER })?;
+            self.wal.write_all(&len.to_le_bytes())?;
+            self.wal.write_all(&payload)?;
+            checksum(FNV, &payload)
+        } else {
+            self.wal.write_all(HEADER)?;
+            self.wal.write_all(&len.to_le_bytes())?;
+            let mut buffer = [0; 65536];
+            let mut hash = FNV;
+            let mut remaining = len;
+            while remaining > 0 {
+                let count = remaining.min(buffer.len() as u64) as usize;
+                reader.read_exact(&mut buffer[..count])?;
+                hash = checksum(hash, &buffer[..count]);
+                self.wal.write_all(&buffer[..count])?;
+                remaining -= count as u64;
             }
-            hash = checksum(hash, &buffer[..n]);
-            self.wal.write_all(&buffer[..n])?;
-        }
-        self.wal.write_all(COMMIT)?;
+            hash
+        };
+        self.wal
+            .write_all(if compact { BLOCK_COMMIT } else { COMMIT })?;
         self.wal.write_all(&hash.to_le_bytes())?;
         // This is the only commit acknowledgement gate. Derived indexes need no fsync.
         self.wal.sync_all()?;
-        self.replay(pos + 16, len)
+        self.replay(pos + 16, len, compact)
     }
     pub fn view(&self, table: &str, transaction: Option<&Changes>) -> Result<View> {
         let committed = self.indexes.get(table);
@@ -604,6 +774,7 @@ impl Store {
             overlay: overlay.map(DiskIndex::reader).transpose()?,
             extra: overlay.map(DiskIndex::entries).transpose()?,
             wal: WalRead::Direct(File::open(&self.path)?),
+            blocks: BlockReader::default(),
             staged: transaction
                 .map(|tx| File::open(&tx.path).map(WalRead::Direct))
                 .transpose()?,
@@ -700,6 +871,7 @@ pub(crate) struct View {
     overlay: Option<DiskIndex>,
     extra: Option<Entries>,
     wal: WalRead,
+    blocks: BlockReader,
     staged: Option<WalRead>,
 }
 
@@ -772,8 +944,17 @@ impl View {
         file.seek(SeekFrom::Start(offset))?;
         Ok(file)
     }
+
     pub fn read_at(&mut self, position: Position) -> Result<Vec<Value>> {
-        match read_op(self.seek_row(position)?)? {
+        let op = if let Position::Committed(offset) = position
+            && let Some(location) = BlockPosition::unpack(offset)
+        {
+            let (body, _) = self.blocks.read(&mut self.wal, location)?;
+            Some(decode_record(body)?.op)
+        } else {
+            read_op(self.seek_row(position)?)?
+        };
+        match op {
             Some(Op::Put { row, .. }) => Ok(row),
             _ => Err(corrupt("index points to non-row")),
         }
@@ -787,13 +968,19 @@ impl View {
         let Position::Committed(offset) = position else {
             return Err(corrupt("hot scan requires committed positions"));
         };
-        let reader = self.seek_row(position)?;
-        let mut len = [0; 4];
-        reader.read_exact(&mut len)?;
-        let Some(body) = buffer.get_mut(..u32::from_le_bytes(len) as usize) else {
-            return Ok(HotRead::TooLarge);
+        let body = if let Some(location) = BlockPosition::unpack(offset) {
+            let decoded = self.blocks.restore(&mut self.wal, location, buffer)?;
+            &buffer[..decoded.len]
+        } else {
+            let reader = self.seek_row(position)?;
+            let mut len = [0; 4];
+            reader.read_exact(&mut len)?;
+            let Some(body) = buffer.get_mut(..u32::from_le_bytes(len) as usize) else {
+                return Ok(HotRead::TooLarge);
+            };
+            reader.read_exact(body)?;
+            body
         };
-        reader.read_exact(body)?;
         let mut bytes = body
             .strip_prefix(&[1])
             .ok_or_else(|| corrupt("index points to non-row"))?;
@@ -825,10 +1012,17 @@ impl View {
         buffer: &mut Vec<u8>,
     ) -> Result<Option<LocatedRow>> {
         while let Some((key, position)) = self.next_position()? {
-            if !read_body(self.seek_row(position)?, buffer)? {
-                return Err(corrupt("index points to missing row"));
-            }
-            if let Some(values) = decode_matching_row(buffer, equalities)? {
+            let body = if let Position::Committed(offset) = position
+                && let Some(location) = BlockPosition::unpack(offset)
+            {
+                self.blocks.read(&mut self.wal, location)?.0
+            } else {
+                if !read_body(self.seek_row(position)?, buffer)? {
+                    return Err(corrupt("index points to missing row"));
+                }
+                buffer.as_slice()
+            };
+            if let Some(values) = decode_matching_row(body, equalities)? {
                 return Ok(Some(LocatedRow {
                     key,
                     position,

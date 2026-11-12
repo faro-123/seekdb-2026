@@ -534,3 +534,64 @@ fn hot_distance_projection_uses_its_own_query_vector() {
         json!([[1, [0.0, 0.0], 1.0], [2, [1.0, 0.0], 0.0]])
     );
 }
+
+#[test]
+fn compact_commits_recover_multiple_blocks_and_mix_with_legacy_rows() {
+    let data = Data::new();
+    let suffix = "重复后缀".repeat(8);
+    let rows = (1..=520)
+        .map(|id| format!("('文档{id:04}{suffix}',{id},'[1,-0.0,0]','甲')"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = [
+        "CREATE TABLE t (body VARCHAR(500000), id BIGINT PRIMARY KEY, v VECTOR(3), c VARCHAR(2));"
+            .into(),
+        "BEGIN;".into(),
+        format!("INSERT INTO t VALUES {rows};"),
+        "COMMIT;".into(),
+        "CREATE VECTOR INDEX vi ON t(v);".into(),
+    ];
+    let result = session(&data, &sql);
+    assert!(result.iter().all(|r| r["ok"] == true), "{result:?}");
+    let wal = fs::read(data.0.join("commits.mv1")).unwrap();
+    assert!(wal.windows(8).any(|bytes| bytes == b"MVTX0002"));
+    assert!(wal.len() < 30_000, "shared text must shrink: {}", wal.len());
+
+    let project = "SELECT id,body,v FROM t WHERE c='甲' ORDER BY L2_DISTANCE(v,'[1,0,0]') LIMIT 2;";
+    for budget in [0, 8 << 20] {
+        let reply = session_with_hot_budget(
+            &data,
+            &[
+                project.into(),
+                "SELECT id FROM t ORDER BY L2_DISTANCE(v,'[1,0,0]') LIMIT 2;".into(),
+            ],
+            budget,
+        );
+        assert_eq!(
+            reply[0]["rows"],
+            json!([
+                [1, format!("文档0001{suffix}"), [1.0, -0.0, 0.0]],
+                [2, format!("文档0002{suffix}"), [1.0, -0.0, 0.0]]
+            ])
+        );
+        assert_eq!(reply[1]["rows"], json!([[1], [2]]));
+    }
+    let large = "z".repeat(300_000);
+    let reply = session(
+        &data,
+        &[
+            format!("UPDATE t SET body='{large}',v='[0,0,0]' WHERE id=1;"),
+            "DELETE FROM t WHERE id=2;".into(),
+            "INSERT INTO t VALUES ('重插',2,'[1,0,0]','甲');".into(),
+        ],
+    );
+    assert!(reply.iter().all(|r| r["ok"] == true), "{reply:?}");
+    let reply = session(&data, &[project.into()]);
+    assert_eq!(
+        reply[0]["rows"],
+        json!([
+            [2, "重插", [1.0, 0.0, 0.0]],
+            [3, format!("文档0003{suffix}"), [1.0, -0.0, 0.0]]
+        ])
+    );
+}
