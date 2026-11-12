@@ -1,5 +1,5 @@
 //! Bounded resident positions for dense integer keys, with a disk hash fallback.
-use std::cell::Cell;
+use std::cell::{Cell, RefCell, RefMut};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -25,7 +25,7 @@ pub(crate) struct PositionBudget(Rc<BudgetState>);
 struct BudgetState {
     cap: usize,
     used: Cell<usize>,
-    _stage: Option<Reservation>,
+    stage: RefCell<Option<Reservation>>,
 }
 
 impl PositionBudget {
@@ -37,11 +37,14 @@ impl PositionBudget {
         Self(Rc::new(BudgetState {
             cap,
             used: Cell::new(0),
-            _stage: reservation,
+            stage: RefCell::new(reservation),
         }))
     }
 
     fn reserve(&self, bytes: usize) -> Option<Charge> {
+        // An encoder can borrow unused headroom before replay, when it
+        // neither allocates nor mutates index pages.
+        let _stage = self.0.stage.try_borrow().ok()?;
         let next = self.0.used.get().checked_add(bytes)?;
         if next > self.0.cap {
             return None;
@@ -51,6 +54,30 @@ impl PositionBudget {
             budget: self.clone(),
             bytes,
         })
+    }
+
+    pub fn lend_unused(&self) -> PositionLoan<'_> {
+        let mut stage = self.0.stage.borrow_mut();
+        if let Some(reservation) = stage.as_mut() {
+            assert!(reservation.resize(self.0.used.get()));
+        }
+        PositionLoan {
+            stage,
+            cap: self.0.cap,
+        }
+    }
+}
+
+pub(crate) struct PositionLoan<'a> {
+    stage: RefMut<'a, Option<Reservation>>,
+    cap: usize,
+}
+
+impl Drop for PositionLoan<'_> {
+    fn drop(&mut self) {
+        if let Some(reservation) = self.stage.as_mut() {
+            assert!(reservation.resize(self.cap));
+        }
     }
 }
 
@@ -508,6 +535,14 @@ mod tests {
         assert!(budget.0.used.get() <= cap);
         assert_eq!(row.get(0).unwrap().unwrap().offset, 11);
         assert_eq!(vector.get(0).unwrap().unwrap().offset, 12);
+        let used = budget.0.used.get();
+        let positions = budget.lend_unused();
+        assert!(budget.reserve(1).is_none());
+        let encode = stage.reserve((1024 - 112) * 1024 - used).unwrap();
+        assert!(stage.reserve(1).is_none());
+        drop(encode);
+        drop(positions);
+        assert!(stage.reserve((1024 - 112) * 1024 - cap + 1).is_none());
     }
 
     #[test]

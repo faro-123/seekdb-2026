@@ -47,6 +47,18 @@ pub(crate) struct Reservation {
     bytes: usize,
 }
 
+impl Reservation {
+    pub fn resize(&mut self, bytes: usize) -> bool {
+        let occupied = self.budget.0.get() - self.bytes;
+        if bytes > TOTAL_BUDGET - FIXED_BUDGET - occupied {
+            return false;
+        }
+        self.budget.0.set(occupied + bytes);
+        self.bytes = bytes;
+        true
+    }
+}
+
 impl Drop for Reservation {
     fn drop(&mut self) {
         self.budget.0.set(self.budget.0.get() - self.bytes);

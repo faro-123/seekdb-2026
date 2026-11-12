@@ -859,6 +859,7 @@ impl Store {
         }
         let pos = self.wal.seek(SeekFrom::End(0))?;
         let staged = changes.stage.bytes();
+        let positions = self.position_budget.lend_unused();
         let reservation = if len <= commit_block::MAX_INPUT_BYTES as u64
             && pos <= BlockPosition::MAX_START - (len + 32)
         {
@@ -911,6 +912,7 @@ impl Store {
                 hash
             }
         };
+        drop(positions);
         self.wal
             .write_all(if compact { BLOCK_COMMIT } else { COMMIT })?;
         self.wal.write_all(&hash.to_le_bytes())?;
