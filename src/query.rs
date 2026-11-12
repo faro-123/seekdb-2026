@@ -672,7 +672,7 @@ impl<W: Write> RowWriter<W> {
 fn try_hot(
     plan: &Plan,
     schema: &Schema,
-    store: &Store,
+    store: &mut Store,
     cache: &mut HotCache,
     writer: &mut RowWriter<impl Write>,
 ) -> Result<bool> {

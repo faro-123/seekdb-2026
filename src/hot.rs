@@ -675,7 +675,7 @@ impl HotCache {
 
     pub fn get(
         &mut self,
-        store: &Store,
+        store: &mut Store,
         schema: &Schema,
         vector: usize,
         fields: &[usize],
@@ -684,11 +684,7 @@ impl HotCache {
         if schema.name.len() > 4096 {
             return Ok(None);
         }
-        let Some(budget) = self
-            .budget
-            .checked_sub(WORK_BYTES + store.cached_bytes())
-            .filter(|n| *n > 0)
-        else {
+        let Some(budget) = self.budget.checked_sub(WORK_BYTES).filter(|n| *n > 0) else {
             return Ok(None);
         };
         // Small fixed workspace even for SQL with many duplicate predicates.
@@ -728,19 +724,26 @@ impl HotCache {
         self.invalidate();
         union[..count].sort_unstable();
         if let Some((kernel, query)) = try_mapped
-            && let Some(map) = store.cached_committed()
+            && let Some(map) = store.prepare_cached()?
+            && let Some(packed_budget) = budget.checked_sub(store.cached_bytes())
             && let Some(table) = HotTable::build(
                 store,
                 schema,
                 vector,
                 &union[..count],
-                budget,
+                packed_budget,
                 VectorBuild::Mapped { map, kernel, query },
             )?
         {
+            store.release_cached_pages();
             self.snapshot = Snapshot::Ready(table);
             return Ok(self.table());
         }
+        // Do not evict file pages or keep an unused copy for raw/half fallback.
+        store.discard_cached();
+        let Some(budget) = budget.checked_sub(store.cached_bytes()) else {
+            return Ok(None);
+        };
         self.snapshot = match HotTable::build(
             store,
             schema,
@@ -809,7 +812,7 @@ mod tests {
         store.commit(&changes).unwrap();
         let mut cache = HotCache::with_budget(MAX_BYTES);
         let table = cache
-            .get(&store, &schema, 1, &[], Some(&[0.0; 128]))
+            .get(&mut store, &schema, 1, &[], Some(&[0.0; 128]))
             .unwrap()
             .unwrap();
         let hits = table
@@ -846,7 +849,7 @@ mod tests {
             &[1.0; 128]
         );
         let fallback = cache
-            .get(&store, &schema, 1, &[], Some(&[0.5; 128]))
+            .get(&mut store, &schema, 1, &[], Some(&[0.5; 128]))
             .unwrap()
             .unwrap();
         assert!(fallback.packed.is_none());
@@ -938,14 +941,14 @@ mod tests {
         let mut cache = HotCache::with_budget(MAX_BYTES);
         cache.compact = true;
         let table = cache
-            .get(&store, &schema, 2, &[1], None)
+            .get(&mut store, &schema, 2, &[1], None)
             .unwrap()
             .expect("committed row must become hot");
         assert_eq!(table.vector(0, &mut Vec::new()).unwrap(), [1.0, 2.0]);
         let address = table.vectors.half.as_ptr();
         assert_eq!(
             cache
-                .get(&store, &schema, 2, &[], None)
+                .get(&mut store, &schema, 2, &[], None)
                 .unwrap()
                 .unwrap()
                 .vectors
@@ -956,14 +959,14 @@ mod tests {
         );
         assert!(
             HotCache::with_budget(WORK_BYTES)
-                .get(&store, &schema, 2, &[1], None)
+                .get(&mut store, &schema, 2, &[1], None)
                 .unwrap()
                 .is_none()
         );
         let mut raw_cache = HotCache::with_budget(MAX_BYTES);
         raw_cache.compact = false;
         let raw = raw_cache
-            .get(&store, &schema, 2, &[1], None)
+            .get(&mut store, &schema, 2, &[1], None)
             .unwrap()
             .unwrap();
         assert_eq!(raw.vectors.raw, [1.0, 2.0]);

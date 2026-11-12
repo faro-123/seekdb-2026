@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::commit_block::{self, Block, RestoredRow};
 use crate::committed_cache::{self, CommittedCache, CommittedView};
@@ -579,6 +579,7 @@ pub(crate) struct Store {
     wal: File,
     committed_end: u64,
     committed_cache: Option<Rc<CommittedCache>>,
+    cache_lease: Weak<CommittedCache>,
     committed_limit: usize,
     path: PathBuf,
     scratch: PathBuf,
@@ -641,6 +642,7 @@ impl Store {
             wal,
             committed_end: 0,
             committed_cache: None,
+            cache_lease: Weak::new(),
             committed_limit: std::env::var("MINIVECTORDB_COMMITTED_BYTES")
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
@@ -867,7 +869,6 @@ impl Store {
         }
         self.wal.seek(SeekFrom::End(0))?;
         self.committed_end = pos;
-        self.refresh_cache(None)?;
         Ok(())
     }
     pub fn commit(&mut self, changes: &Changes) -> Result<()> {
@@ -875,6 +876,7 @@ impl Store {
         if len == 0 {
             return Ok(());
         }
+        self.discard_cached();
         let pos = self.wal.seek(SeekFrom::End(0))?;
         let staged = changes.stage.bytes();
         let positions = self.position_budget.lend_unused();
@@ -936,28 +938,31 @@ impl Store {
         self.wal.write_all(&hash.to_le_bytes())?;
         // This is the only commit acknowledgement gate. Derived indexes need no fsync.
         self.wal.sync_all()?;
-        // Readers use the cached prefix and fall through to the new WAL tail.
-        // DDL replay can therefore index both prior rows and rows in this frame.
         self.replay(pos + 16, len, compact)?;
-        let previous = self.committed_cache.take();
         self.committed_end = pos + len + 32;
-        if previous.is_some() {
-            self.refresh_cache(previous)?;
-        }
         Ok(())
     }
 
-    fn refresh_cache(&mut self, previous: Option<Rc<CommittedCache>>) -> Result<()> {
-        self.committed_cache = CommittedCache::refresh(
-            previous,
-            &self.wal,
-            self.committed_end,
-            self.committed_limit,
-        )?;
+    /// Only one cache generation may consume budget, including detached readers.
+    pub fn prepare_cached(&mut self) -> Result<Option<CommittedView>> {
+        if self.committed_cache.is_none() && self.cache_lease.strong_count() == 0 {
+            self.committed_cache =
+                CommittedCache::refresh(None, &self.wal, self.committed_end, self.committed_limit)?;
+            if let Some(cache) = &self.committed_cache {
+                self.cache_lease = Rc::downgrade(cache);
+            }
+        }
+        Ok(self.cached_committed())
+    }
+
+    pub fn discard_cached(&mut self) {
+        self.committed_cache = None;
+    }
+
+    pub fn release_cached_pages(&self) {
         if self.committed_cache.is_some() {
             committed_cache::release_file_pages(&self.wal, self.committed_end);
         }
-        Ok(())
     }
 
     fn wal_reader(&self) -> Result<WalRead> {
@@ -968,8 +973,8 @@ impl Store {
     }
 
     pub fn cached_bytes(&self) -> usize {
-        self.committed_cache
-            .as_ref()
+        self.cache_lease
+            .upgrade()
             .map_or(0, |cache| cache.allocated())
     }
 
@@ -1330,6 +1335,73 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writes_and_recovery_do_not_materialize_a_query_cache() {
+        let path = std::env::temp_dir().join(format!(
+            "mv-lazy-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut store = Store::open(&path).unwrap();
+        assert!(store.cached_committed().is_none());
+        let mut changes = store.changes(store.catalog.clone()).unwrap();
+        changes
+            .push(Op::Schema(Schema {
+                name: "t".into(),
+                primary: 0,
+                columns: vec![crate::types::Column {
+                    name: "id".into(),
+                    kind: DataType::Bigint,
+                    primary: true,
+                }],
+                indexes: vec![],
+            }))
+            .unwrap();
+        changes
+            .push(Op::Put {
+                table: "t".into(),
+                key: 7,
+                row: vec![Value::Int(7)],
+            })
+            .unwrap();
+        store.commit(&changes).unwrap();
+        assert!(store.cached_committed().is_none());
+        drop(changes);
+        let old = store.prepare_cached().unwrap().unwrap();
+        let original_len = old.bytes().len();
+        let mut changes = store.changes(store.catalog.clone()).unwrap();
+        changes
+            .push(Op::Put {
+                table: "t".into(),
+                key: 8,
+                row: vec![Value::Int(8)],
+            })
+            .unwrap();
+        store.commit(&changes).unwrap();
+        assert!(store.cached_committed().is_none());
+        assert!(
+            store.prepare_cached().unwrap().is_none(),
+            "a detached old reader must prevent a second allocation"
+        );
+        assert!(store.cached_bytes() > original_len);
+        assert_eq!(old.bytes().len(), original_len);
+        drop(old);
+        assert!(store.prepare_cached().unwrap().unwrap().bytes().len() > original_len);
+        drop(changes);
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(store.cached_committed().is_none());
+        assert_eq!(
+            store.view("t", None).unwrap().next().unwrap().unwrap().key,
+            7
+        );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     #[test]
     fn encodes_losslessly_and_keeps_raw_fallback_compatible() {
