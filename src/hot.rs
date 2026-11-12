@@ -5,9 +5,12 @@ use std::mem::size_of;
 
 use crate::distance::{DistanceBounds, SquaredL2, supports_compact_screening};
 use crate::half;
+use crate::packed_hot::{self, Kernel};
 use crate::storage::VectorData;
 use crate::storage::{Field, HotRead, Store};
 use crate::types::{DataType, Schema, Value};
+use crate::vector_codec::{HEADER_BYTES, Header};
+use crate::wal_map::WalMap;
 use crate::{Error, Result};
 
 const WORK_BYTES: usize = 1 << 20;
@@ -44,6 +47,51 @@ struct HotVectors {
     raw: Vec<f32>,
     // Only mixed snapshots need per-row positions. The high bit selects raw.
     slots: Vec<u32>,
+}
+
+struct PackedLocation {
+    payload: u32,
+    base: i16,
+    width: u8,
+}
+
+impl PackedLocation {
+    fn from_field(map: &WalMap, at: Option<u64>, dim: usize) -> Option<(i16, Self)> {
+        let offset = usize::try_from(at?).ok()?;
+        let (exponent, width, base, _) = packed_hot::layout(map.bytes().get(offset..)?, dim)?;
+        let payload = u32::try_from(offset + 5 + HEADER_BYTES).ok()?;
+        Some((
+            exponent,
+            Self {
+                payload,
+                base,
+                width,
+            },
+        ))
+    }
+
+    fn payload<'a>(&self, map: &'a WalMap, dim: usize) -> &'a [u8] {
+        let offset = self.payload as usize;
+        &map.bytes()[offset..][..(dim * usize::from(self.width)).div_ceil(8)]
+    }
+}
+
+struct PackedSnapshot {
+    map: WalMap,
+    kernel: Kernel,
+    exponent: i16,
+    locations: Vec<PackedLocation>,
+}
+
+enum VectorBuild<'a> {
+    Copied {
+        half: bool,
+    },
+    Mapped {
+        map: WalMap,
+        kernel: Kernel,
+        query: &'a [f32],
+    },
 }
 
 impl HotVectors {
@@ -122,6 +170,7 @@ pub(crate) struct HotTable {
     dim: usize,
     primary: usize,
     vectors: HotVectors,
+    packed: Option<PackedSnapshot>,
     rows: Vec<HotRow>,
     columns: Vec<HotColumn>,
 }
@@ -172,8 +221,20 @@ impl HotTable {
         &self.rows[slot]
     }
 
-    pub fn vector<'a>(&'a self, slot: usize, scratch: &'a mut Vec<f32>) -> &'a [f32] {
-        self.vectors.expanded(slot, scratch)
+    pub fn vector<'a>(&'a self, slot: usize, scratch: &'a mut Vec<f32>) -> Result<&'a [f32]> {
+        if let Some(packed) = &self.packed {
+            let location = &packed.locations[slot];
+            let start = location.payload as usize;
+            let header = Header::parse(
+                packed.map.bytes()[start - HEADER_BYTES..start]
+                    .first_chunk()
+                    .unwrap(),
+            );
+            scratch.clear();
+            header.decode(self.dim, location.payload(&packed.map, self.dim), scratch)?;
+            return Ok(scratch);
+        }
+        Ok(self.vectors.expanded(slot, scratch))
     }
 
     pub fn compare(&self, slot: usize, column: usize, wanted: &Value) -> Ordering {
@@ -206,18 +267,59 @@ impl HotTable {
         retain_smallest(hits, k, hit);
     }
 
-    pub fn select(&self, q: &[f32], k: usize, matches: impl Fn(usize) -> bool) -> Vec<Hit> {
-        if let Some(hits) = self.screened(q, k, &matches) {
-            return hits;
+    pub fn select(&self, q: &[f32], k: usize, matches: impl Fn(usize) -> bool) -> Result<Vec<Hit>> {
+        if let Some(hits) = self.select_packed(q, k, &matches)? {
+            return Ok(hits);
+        }
+        if self.packed.is_none()
+            && let Some(hits) = self.screened(q, k, &matches)
+        {
+            return Ok(hits);
         }
         let mut hits = BinaryHeap::with_capacity(k.min(self.rows.len()));
         let mut scratch = Vec::new();
         for slot in 0..self.rows.len() {
             if matches(slot) {
-                self.offer(&mut hits, k, slot, q, self.vector(slot, &mut scratch));
+                self.offer(&mut hits, k, slot, q, self.vector(slot, &mut scratch)?);
             }
         }
-        hits.into_sorted_vec()
+        Ok(hits.into_sorted_vec())
+    }
+
+    fn select_packed(
+        &self,
+        q: &[f32],
+        k: usize,
+        matches: impl Fn(usize) -> bool,
+    ) -> Result<Option<Vec<Hit>>> {
+        let Some(packed) = &self.packed else {
+            return Ok(None);
+        };
+        let Some(query) = Kernel::query(q, packed.exponent).filter(|q| q.len() == self.dim) else {
+            return Ok(None);
+        };
+        let mut heap = BinaryHeap::with_capacity(k.min(self.rows.len()));
+        for (slot, location) in packed.locations.iter().enumerate() {
+            if matches(slot) {
+                let sum = packed.kernel.distance(
+                    location.payload(&packed.map, self.dim),
+                    location.width,
+                    location.base,
+                    &query,
+                );
+                retain_smallest(&mut heap, k, (sum, self.rows[slot].key, slot));
+            }
+        }
+        Ok(Some(
+            heap.into_sorted_vec()
+                .into_iter()
+                .map(|(sum, key, slot)| Hit {
+                    distance: SquaredL2::from_scaled_sum(sum, packed.exponent),
+                    key,
+                    slot,
+                })
+                .collect(),
+        ))
     }
 
     fn screened(&self, q: &[f32], k: usize, matches: &impl Fn(usize) -> bool) -> Option<Vec<Hit>> {
@@ -261,7 +363,13 @@ impl HotTable {
             // At least K exact distances are <= threshold if K rows match.
             // Include equality so even unresolved ties reach the exact key.
             if bounds.lower(estimate) <= threshold {
-                self.offer(&mut hits, k, slot, q, self.vector(slot, &mut scratch));
+                self.offer(
+                    &mut hits,
+                    k,
+                    slot,
+                    q,
+                    self.vectors.expanded(slot, &mut scratch),
+                );
             }
         }
         Some(hits.into_sorted_vec())
@@ -273,7 +381,7 @@ impl HotTable {
         embedding: usize,
         fields: &[usize],
         budget: usize,
-        compact: bool,
+        build: VectorBuild<'_>,
     ) -> Result<Option<Self>> {
         let DataType::Vector(dim) = schema.columns[embedding].kind else {
             unreachable!("hot scan requires a bound vector");
@@ -282,7 +390,11 @@ impl HotTable {
         if dim == 0 || dim > MAX_BODY / size_of::<f32>() || schema.columns.len() > MAX_COLUMNS {
             return Ok(None);
         }
+        let compact = matches!(build, VectorBuild::Copied { half: true });
         let mut row_width = size_of::<HotRow>();
+        if matches!(build, VectorBuild::Mapped { .. }) {
+            row_width += size_of::<PackedLocation>();
+        }
         // Include table name, column descriptors, and each text column's initial offset.
         let mut bytes = size_of::<Self>()
             + size_of::<HotCache>()
@@ -305,6 +417,7 @@ impl HotTable {
         let mut text_bytes = [0; MAX_FIELDS];
         let mut rows = 0;
         let mut packed = 0;
+        let mut exponent = None;
         let mut expanded = Vec::with_capacity(if compact { dim } else { 0 });
         if !scan_rows(store, schema, embedding, fields, &mut buffer, |cell| {
             match cell {
@@ -312,12 +425,22 @@ impl HotTable {
                     bytes += row_width;
                     rows += 1;
                 }
-                Cell::Embedding(values) => {
+                Cell::Embedding(values, address) => {
                     if values.len() != dim {
                         return Err(Error::new(
                             "storage_error",
                             "hot vector dimension differs from schema",
                         ));
+                    }
+                    if let VectorBuild::Mapped { map, query, .. } = &build {
+                        let Some((scale, _)) = PackedLocation::from_field(map, address, dim) else {
+                            return Ok(false);
+                        };
+                        if let Some(expected) = exponent {
+                            return Ok(expected == scale);
+                        }
+                        exponent = Some(scale);
+                        return Ok(Kernel::compatible(query, scale));
                     }
                     if compact {
                         expanded.clear();
@@ -344,12 +467,28 @@ impl HotTable {
         if packed != 0 && packed != rows && bytes + rows * size_of::<u32>() > budget {
             return Ok(None);
         }
+        let mapped = match build {
+            VectorBuild::Mapped { map, kernel, .. } => {
+                let Some(exponent) = exponent else {
+                    return Ok(None);
+                };
+                Some(PackedSnapshot {
+                    map,
+                    kernel,
+                    exponent,
+                    locations: Vec::with_capacity(rows),
+                })
+            }
+            VectorBuild::Copied { .. } => None,
+        };
+        let copied = if mapped.is_some() { 0 } else { rows };
         let mut table = Self {
             name: schema.name.clone(),
             embedding,
             dim,
             primary: schema.primary,
-            vectors: HotVectors::new(dim, rows, packed),
+            vectors: HotVectors::new(dim, copied, packed),
+            packed: mapped,
             rows: Vec::with_capacity(rows),
             columns: fields
                 .iter()
@@ -376,8 +515,18 @@ impl HotTable {
                 Cell::Row(key, offset) if table.rows.len() < rows => {
                     table.rows.push(HotRow { key, offset });
                 }
-                Cell::Embedding(values) if values.len() == dim => {
-                    if !compact {
+                Cell::Embedding(values, address) if values.len() == dim => {
+                    if let Some(snapshot) = &mut table.packed {
+                        let Some((scale, location)) =
+                            PackedLocation::from_field(&snapshot.map, address, dim)
+                        else {
+                            return Ok(false);
+                        };
+                        if scale != snapshot.exponent || snapshot.locations.len() >= rows {
+                            return Ok(false);
+                        }
+                        snapshot.locations.push(location);
+                    } else if !compact {
                         let raw = &mut table.vectors.raw;
                         if raw.len() + dim > raw.capacity() {
                             return Ok(false);
@@ -409,7 +558,11 @@ impl HotTable {
         if !complete
             || table.rows.len() != rows
             || table.vectors.half.len() != packed * dim
-            || table.vectors.raw.len() != (rows - packed) * dim
+            || table.vectors.raw.len() != (copied - packed) * dim
+            || table
+                .packed
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.locations.len() != rows)
         {
             return Err(Error::new(
                 "storage_error",
@@ -422,7 +575,7 @@ impl HotTable {
 
 enum Cell<'a> {
     Row(i64, u64),
-    Embedding(VectorData<'a>),
+    Embedding(VectorData<'a>, Option<u64>),
     Scalar(usize, Field<'a>),
 }
 
@@ -457,12 +610,12 @@ fn scan_rows(
         }
         let mut wanted = selected.iter().enumerate().peekable();
         for index in 0..fields.count() {
-            let field = fields.next_field()?;
+            let (field, address) = fields.next_field()?;
             let cell = if index == embedding {
                 let Field::Vector(values) = field else {
                     return Err(Error::new("storage_error", "hot row vector is missing"));
                 };
-                Cell::Embedding(values)
+                Cell::Embedding(values, address)
             } else if wanted.peek().is_some_and(|&(_, &column)| column == index) {
                 Cell::Scalar(wanted.next().unwrap().0, field)
             } else {
@@ -484,6 +637,7 @@ enum Snapshot {
 pub(crate) struct HotCache {
     budget: usize,
     compact: bool,
+    mapped: Option<Kernel>,
     snapshot: Snapshot,
 }
 
@@ -501,6 +655,9 @@ impl HotCache {
         Self {
             budget,
             compact: supports_compact_screening(),
+            mapped: Kernel::detect().filter(|_| {
+                std::env::var_os("MINIVECTORDB_PACKED_HOT").is_none_or(|value| value != "0")
+            }),
             snapshot: Snapshot::Empty,
         }
     }
@@ -522,6 +679,7 @@ impl HotCache {
         schema: &Schema,
         vector: usize,
         fields: &[usize],
+        query: Option<&[f32]>,
     ) -> Result<Option<&HotTable>> {
         if schema.name.len() > 4096 {
             return Ok(None);
@@ -533,12 +691,20 @@ impl HotCache {
         let mut union = [0; MAX_FIELDS];
         let mut count = fields.len();
         union[..count].copy_from_slice(fields);
+        let mut try_mapped = self.mapped.zip(query);
         match &self.snapshot {
             Snapshot::Denied(name) if *name == schema.name => return Ok(None),
             Snapshot::Ready(table) if table.name == schema.name && table.embedding == vector => {
-                if fields
-                    .iter()
-                    .all(|i| table.columns.iter().any(|col| col.index == *i))
+                let compatible = table.packed.as_ref().is_none_or(|snapshot| {
+                    query.is_some_and(|q| Kernel::compatible(q, snapshot.exponent))
+                });
+                if !compatible {
+                    try_mapped = None;
+                }
+                if compatible
+                    && fields
+                        .iter()
+                        .all(|i| table.columns.iter().any(|col| col.index == *i))
                 {
                     return Ok(self.table());
                 }
@@ -557,11 +723,32 @@ impl HotCache {
         // Evict before counting or allocating the next table, including column expansion.
         self.invalidate();
         union[..count].sort_unstable();
-        self.snapshot =
-            match HotTable::build(store, schema, vector, &union[..count], budget, self.compact)? {
-                Some(table) => Snapshot::Ready(table),
-                None => Snapshot::Denied(schema.name.clone()),
-            };
+        if let Some((kernel, query)) = try_mapped
+            && let Some(map) = store.map_committed(budget)
+            && let Some(budget) = budget.checked_sub(map.bytes().len().next_multiple_of(4096))
+            && let Some(table) = HotTable::build(
+                store,
+                schema,
+                vector,
+                &union[..count],
+                budget,
+                VectorBuild::Mapped { map, kernel, query },
+            )?
+        {
+            self.snapshot = Snapshot::Ready(table);
+            return Ok(self.table());
+        }
+        self.snapshot = match HotTable::build(
+            store,
+            schema,
+            vector,
+            &union[..count],
+            budget,
+            VectorBuild::Copied { half: self.compact },
+        )? {
+            Some(table) => Snapshot::Ready(table),
+            None => Snapshot::Denied(schema.name.clone()),
+        };
         Ok(self.table())
     }
 }
@@ -574,6 +761,107 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn packed_snapshot_scans_original_vectors_and_keeps_projection_offsets() {
+        if crate::packed_hot::Kernel::detect().is_none() {
+            return;
+        }
+        let path = std::env::temp_dir().join(format!(
+            "mv-packed-hot-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let schema = Schema {
+            name: "t".into(),
+            primary: 0,
+            columns: vec![
+                Column {
+                    name: "id".into(),
+                    kind: DataType::Bigint,
+                    primary: true,
+                },
+                Column {
+                    name: "embedding".into(),
+                    kind: DataType::Vector(128),
+                    primary: false,
+                },
+            ],
+            indexes: vec![("vi".into(), 1)],
+        };
+        let mut store = Store::open(&path).unwrap();
+        let mut changes = store.changes(store.catalog.clone()).unwrap();
+        changes.push(Op::Schema(schema.clone())).unwrap();
+        for key in [7, -2, 5] {
+            let value = if key == 5 { 3.0 } else { 1.0 };
+            changes
+                .push(Op::Put {
+                    table: "t".into(),
+                    key,
+                    row: vec![Value::Int(key), Value::Vector(vec![value; 128])],
+                })
+                .unwrap();
+        }
+        store.commit(&changes).unwrap();
+        let mut cache = HotCache::with_budget(MAX_BYTES);
+        let table = cache
+            .get(&store, &schema, 1, &[], Some(&[0.0; 128]))
+            .unwrap()
+            .unwrap();
+        let hits = table
+            .select_packed(&[0.0; 128], 3, |_| true)
+            .unwrap()
+            .expect("bounded uniform vectors must use the packed scan");
+        assert!(table.vectors.raw.is_empty() && table.vectors.half.is_empty());
+        assert_eq!(
+            hits.iter().map(|hit| hit.key).collect::<Vec<_>>(),
+            [-2, 7, 5]
+        );
+        assert_eq!(
+            hits[0].distance,
+            SquaredL2::between(&[1.0; 128], &[0.0; 128])
+        );
+        assert!(
+            table
+                .select_packed(&[0.5; 128], 3, |_| true)
+                .unwrap()
+                .is_none(),
+            "queries outside the lattice must go through the exact fallback"
+        );
+        let mut view = store.view("t", None).unwrap();
+        let row = view
+            .read_at(crate::storage::Position::Committed(
+                table.row(hits[0].slot).offset,
+            ))
+            .unwrap();
+        assert!(
+            matches!(row.as_slice(), [Value::Int(-2), Value::Vector(vector)] if vector == &[1.0; 128])
+        );
+        assert_eq!(
+            table.vector(hits[0].slot, &mut Vec::new()).unwrap(),
+            &[1.0; 128]
+        );
+        let fallback = cache
+            .get(&store, &schema, 1, &[], Some(&[0.5; 128]))
+            .unwrap()
+            .unwrap();
+        assert!(fallback.packed.is_none());
+        assert_eq!(
+            fallback
+                .select(&[0.5; 128], 3, |_| true)
+                .unwrap()
+                .iter()
+                .map(|hit| hit.key)
+                .collect::<Vec<_>>(),
+            [-2, 7, 5]
+        );
+        drop(view);
+        drop(cache);
+        drop(changes);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     #[test]
     fn mixed_snapshot_preserves_half_bits_and_raw_values() {
@@ -647,14 +935,14 @@ mod tests {
         let mut cache = HotCache::with_budget(MAX_BYTES);
         cache.compact = true;
         let table = cache
-            .get(&store, &schema, 2, &[1])
+            .get(&store, &schema, 2, &[1], None)
             .unwrap()
             .expect("committed row must become hot");
-        assert_eq!(table.vector(0, &mut Vec::new()), [1.0, 2.0]);
+        assert_eq!(table.vector(0, &mut Vec::new()).unwrap(), [1.0, 2.0]);
         let address = table.vectors.half.as_ptr();
         assert_eq!(
             cache
-                .get(&store, &schema, 2, &[])
+                .get(&store, &schema, 2, &[], None)
                 .unwrap()
                 .unwrap()
                 .vectors
@@ -665,16 +953,19 @@ mod tests {
         );
         assert!(
             HotCache::with_budget(WORK_BYTES)
-                .get(&store, &schema, 2, &[1])
+                .get(&store, &schema, 2, &[1], None)
                 .unwrap()
                 .is_none()
         );
         let mut raw_cache = HotCache::with_budget(MAX_BYTES);
         raw_cache.compact = false;
-        let raw = raw_cache.get(&store, &schema, 2, &[1]).unwrap().unwrap();
+        let raw = raw_cache
+            .get(&store, &schema, 2, &[1], None)
+            .unwrap()
+            .unwrap();
         assert_eq!(raw.vectors.raw, [1.0, 2.0]);
         assert!(raw.vectors.half.is_empty() && raw.vectors.slots.is_empty());
-        let hits = raw.select(&[1.0, 2.0], 1, |_| true);
+        let hits = raw.select(&[1.0, 2.0], 1, |_| true).unwrap();
         assert_eq!(hits[0].key, 7);
         assert_eq!(hits[0].distance().to_bits(), 0.0_f64.to_bits());
         drop(changes);

@@ -696,10 +696,10 @@ fn try_hot(
             count += 1;
         }
     }
-    let Some(table) = cache.get(store, schema, *embedding, &fields[..count])? else {
+    let Some(table) = cache.get(store, schema, *embedding, &fields[..count], Some(q))? else {
         return Ok(false);
     };
-    let hits = table.select(q, k, |slot| plan.predicates.matches_hot(table, slot));
+    let hits = table.select(q, k, |slot| plan.predicates.matches_hot(table, slot))?;
     let covered = plan.projections.iter().all(|expr| {
         let column = expr.column_index();
         column == schema.primary || column == *embedding
@@ -722,13 +722,13 @@ fn try_hot(
                         serde_json::to_writer(out, &row.key)?;
                     }
                     BoundExpr::Column(_) => {
-                        Value::write_vector_json(table.vector(hit.slot, &mut expanded), out)?
+                        Value::write_vector_json(table.vector(hit.slot, &mut expanded)?, out)?
                     }
                     BoundExpr::Distance(_, query) => {
                         let distance = if query == q {
                             hit.distance()
                         } else {
-                            SquaredL2::between(table.vector(hit.slot, &mut expanded), query)
+                            SquaredL2::between(table.vector(hit.slot, &mut expanded)?, query)
                                 .distance()
                         };
                         serde_json::to_writer(out, &distance)?;

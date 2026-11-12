@@ -5,6 +5,7 @@ mod distance;
 mod engine;
 mod half;
 mod hot;
+mod packed_hot;
 mod position_index;
 mod protocol;
 mod query;
@@ -14,6 +15,7 @@ mod stage;
 mod storage;
 mod types;
 mod vector_codec;
+mod wal_map;
 
 pub use protocol::run;
 

@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::commit_block::{self, Block, RestoredRow};
 use crate::disk_index::{DiskIndex, Entries, Entry};
@@ -11,6 +12,7 @@ use crate::read_batch::{OffsetBatch, WalRead};
 use crate::stage::{Budget, Reservation, Stage};
 use crate::types::{DataType, Schema, Value};
 use crate::vector_codec::{self, HEADER_BYTES, Header as PackedHeader};
+use crate::wal_map::WalMap;
 use crate::{Error, Result};
 
 pub(crate) type Catalog = BTreeMap<String, Schema>;
@@ -575,12 +577,13 @@ pub(crate) struct Store {
     indexes: BTreeMap<String, PositionIndex>,
     vectors: BTreeMap<String, PositionIndex>,
     wal: File,
+    committed_end: u64,
     path: PathBuf,
     scratch: PathBuf,
     sequence: u64,
     stage_budget: Budget,
     position_budget: PositionBudget,
-    _lock: File,
+    _lock: Rc<File>,
 }
 impl Store {
     pub fn open(data: &Path) -> Result<Self> {
@@ -629,12 +632,13 @@ impl Store {
             indexes: BTreeMap::new(),
             vectors: BTreeMap::new(),
             wal,
+            committed_end: 0,
             path,
             scratch,
             sequence: 0,
             stage_budget,
             position_budget,
-            _lock: lock,
+            _lock: Rc::new(lock),
         };
         store.recover()?;
         Ok(store)
@@ -848,6 +852,7 @@ impl Store {
             self.wal.sync_all()?;
         }
         self.wal.seek(SeekFrom::End(0))?;
+        self.committed_end = pos;
         Ok(())
     }
     pub fn commit(&mut self, changes: &Changes) -> Result<()> {
@@ -916,7 +921,26 @@ impl Store {
         self.wal.write_all(&hash.to_le_bytes())?;
         // This is the only commit acknowledgement gate. Derived indexes need no fsync.
         self.wal.sync_all()?;
-        self.replay(pos + 16, len, compact)
+        self.replay(pos + 16, len, compact)?;
+        self.committed_end = pos + len + 32;
+        Ok(())
+    }
+
+    pub fn map_committed(&self, max: usize) -> Option<WalMap> {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            // SAFETY: recovery has finished and future commits only append.
+            // The mapping retains the directory lock until it is unmapped.
+            #[allow(unsafe_code)]
+            unsafe {
+                WalMap::open(&self.wal, self.committed_end, max, &self._lock)
+            }
+        }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        {
+            let _ = max;
+            None
+        }
     }
 
     pub fn view(&self, table: &str, transaction: Option<&Changes>) -> Result<View> {
@@ -1058,6 +1082,12 @@ pub(crate) enum HotRead<'a> {
 pub(crate) struct RowFields<'a> {
     bytes: &'a [u8],
     count: u32,
+    address: FieldAddress,
+}
+
+enum FieldAddress {
+    Contiguous(u64),
+    Block(Option<u64>),
 }
 
 impl<'a> RowFields<'a> {
@@ -1065,8 +1095,23 @@ impl<'a> RowFields<'a> {
         self.count as usize
     }
 
-    pub fn next_field(&mut self) -> Result<Field<'a>> {
-        read_field(&mut self.bytes)
+    pub fn next_field(&mut self) -> Result<(Field<'a>, Option<u64>)> {
+        let remaining = self.bytes.len();
+        let field = read_field(&mut self.bytes)?;
+        let offset = match &mut self.address {
+            FieldAddress::Contiguous(next) => {
+                let offset = *next;
+                *next += (remaining - self.bytes.len()) as u64;
+                Some(offset)
+            }
+            FieldAddress::Block(vector) => *vector,
+        };
+        let vector_offset = if matches!(field, Field::Vector(_)) {
+            offset
+        } else {
+            None
+        };
+        Ok((field, vector_offset))
     }
 }
 
@@ -1125,9 +1170,12 @@ impl View {
         let Position::Committed(offset) = position else {
             return Err(corrupt("hot scan requires committed positions"));
         };
-        let body = if let Some(location) = BlockPosition::unpack(offset) {
+        let (body, block_address) = if let Some(location) = BlockPosition::unpack(offset) {
             let decoded = self.blocks.restore(&mut self.wal, location, buffer)?;
-            &buffer[..decoded.len]
+            (
+                &buffer[..decoded.len],
+                Some(FieldAddress::Block(location.vector_at(&decoded))),
+            )
         } else {
             let reader = self.seek_row(position)?;
             let mut len = [0; 4];
@@ -1136,7 +1184,7 @@ impl View {
                 return Ok(HotRead::TooLarge);
             };
             reader.read_exact(body)?;
-            body
+            (&*body, None)
         };
         let mut bytes = body
             .strip_prefix(&[1])
@@ -1148,7 +1196,13 @@ impl View {
         Ok(HotRead::Row {
             key,
             offset,
-            fields: RowFields { bytes, count },
+            fields: RowFields {
+                bytes,
+                count,
+                address: block_address.unwrap_or_else(|| {
+                    FieldAddress::Contiguous(offset + 4 + (body.len() - bytes.len()) as u64)
+                }),
+            },
         })
     }
 
