@@ -1,13 +1,16 @@
 //! MiniVectorDB: a single-client, durable SQL and exact vector database.
+mod commit_block;
 mod disk_index;
 mod distance;
 mod engine;
 mod half;
 mod hot;
+mod position_index;
 mod protocol;
 mod query;
 mod read_batch;
 mod sql;
+mod stage;
 mod storage;
 mod types;
 mod vector_codec;

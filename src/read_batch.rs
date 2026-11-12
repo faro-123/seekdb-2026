@@ -4,6 +4,7 @@ use std::io::{self, BufReader, Read, Seek, SeekFrom};
 
 use crate::Result;
 use crate::disk_index::Entry;
+use crate::stage::StageRead;
 
 const BATCH_ENTRIES: usize = 4096;
 const READ_BYTES: usize = 8192;
@@ -146,6 +147,7 @@ impl<R: Read + Seek> Seek for BufferedFile<R> {
 pub(crate) enum WalRead {
     Direct(File),
     Buffered(BufferedFile<File>),
+    Stage(StageRead),
 }
 
 impl WalRead {
@@ -168,6 +170,7 @@ impl Read for WalRead {
         match self {
             Self::Direct(file) => file.read(out),
             Self::Buffered(reader) => reader.read(out),
+            Self::Stage(reader) => reader.read(out),
         }
     }
 }
@@ -177,6 +180,7 @@ impl Seek for WalRead {
         match self {
             Self::Direct(file) => file.seek(from),
             Self::Buffered(reader) => reader.seek(from),
+            Self::Stage(reader) => reader.seek(from),
         }
     }
 }

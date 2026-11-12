@@ -2,10 +2,8 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeSet, BinaryHeap};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
-
-use serde::{Deserialize, Serialize};
 
 use crate::distance::SquaredL2;
 use crate::hot::{HotCache, HotTable, MAX_FIELDS, MAX_K};
@@ -332,7 +330,7 @@ impl Plan {
         TableFilter::Full(&self.predicates)
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 enum SortValue {
     Int(i64),
     Text(String),
@@ -359,7 +357,7 @@ impl Ord for SortValue {
         }
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 struct Candidate {
     keys: Vec<(SortValue, bool)>,
     primary: i64,
@@ -381,6 +379,48 @@ impl Candidate {
                 })
                 .sum::<usize>()
     }
+
+    fn write(&self, out: &mut impl Write) -> Result<()> {
+        let (tag, offset) = match self.position {
+            Position::Committed(offset) => (0, offset),
+            Position::Staged(offset) => (1, offset),
+            Position::Vector(offset) => (2, offset),
+        };
+        out.write_all(&[tag])?;
+        out.write_all(&offset.to_le_bytes())?;
+        out.write_all(&self.primary.to_le_bytes())?;
+        write_run_length(out, self.keys.len())?;
+        for (key, descending) in &self.keys {
+            let tag = match key {
+                SortValue::Int(_) => 0,
+                SortValue::Text(_) => 1,
+                SortValue::Distance(_) => 2,
+            };
+            out.write_all(&[tag | u8::from(*descending) << 2])?;
+            match key {
+                SortValue::Int(key) => out.write_all(&key.to_le_bytes())?,
+                SortValue::Text(key) => {
+                    write_run_length(out, key.len())?;
+                    out.write_all(key.as_bytes())?;
+                }
+                SortValue::Distance(key) => key.write_run(out)?,
+            }
+        }
+        Ok(())
+    }
+}
+
+fn write_run_length(out: &mut impl Write, length: usize) -> Result<()> {
+    let length = u32::try_from(length)
+        .map_err(|_| Error::new("resource_limit", "sort run field too large"))?;
+    out.write_all(&length.to_le_bytes())?;
+    Ok(())
+}
+
+fn read_run_bytes<const N: usize>(reader: &mut impl Read) -> Result<[u8; N]> {
+    let mut bytes = [0; N];
+    reader.read_exact(&mut bytes)?;
+    Ok(bytes)
 }
 impl PartialEq for Candidate {
     fn eq(&self, other: &Self) -> bool {
@@ -425,7 +465,7 @@ impl Runs {
     }
     fn fan_in(&self) -> usize {
         // Bound retained decoded heads separately from the run-generation
-        // budget. A merge also needs one JSON input line and its decoded key.
+        // budget. Binary run I/O reads each key into its final allocation.
         // At least two heads are necessary to make progress for oversized keys.
         (self.head_budget / self.max_candidate_bytes.max(1)).clamp(2, 16)
     }
@@ -453,8 +493,7 @@ impl Runs {
             let path = self.path();
             let mut out = BufWriter::new(File::create(&path)?);
             merge(&paths, |c| {
-                serde_json::to_writer(&mut out, &c)?;
-                out.write_all(b"\n")?;
+                c.write(&mut out)?;
                 Ok(true)
             })?;
             out.flush()?;
@@ -474,8 +513,7 @@ impl Runs {
         let path = self.path();
         let mut out = BufWriter::new(File::create(&path)?);
         for c in buffer.drain(..) {
-            serde_json::to_writer(&mut out, &c)?;
-            out.write_all(b"\n")?;
+            c.write(&mut out)?;
         }
         out.flush()?;
         drop(out);
@@ -490,8 +528,7 @@ impl Runs {
                 let path = self.path();
                 let mut out = BufWriter::new(File::create(&path)?);
                 merge(batch, |c| {
-                    serde_json::to_writer(&mut out, &c)?;
-                    out.write_all(b"\n")?;
+                    c.write(&mut out)?;
                     Ok(true)
                 })?;
                 out.flush()?;
@@ -513,12 +550,41 @@ impl Drop for Runs {
     }
 }
 fn read_candidate(reader: &mut BufReader<File>) -> Result<Option<Candidate>> {
-    let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
-        Ok(None)
-    } else {
-        Ok(Some(serde_json::from_str(&line)?))
+    if reader.fill_buf()?.is_empty() {
+        return Ok(None);
     }
+    let [tag] = read_run_bytes(reader)?;
+    let offset = u64::from_le_bytes(read_run_bytes(reader)?);
+    let invalid = || Error::new("storage_error", "invalid sort run record");
+    let position = match tag {
+        0 => Position::Committed(offset),
+        1 => Position::Staged(offset),
+        2 => Position::Vector(offset),
+        _ => return Err(invalid()),
+    };
+    let primary = i64::from_le_bytes(read_run_bytes(reader)?);
+    let count = u32::from_le_bytes(read_run_bytes(reader)?);
+    let mut keys = Vec::new();
+    for _ in 0..count {
+        let [tag] = read_run_bytes(reader)?;
+        let value = match tag & !4 {
+            0 => SortValue::Int(i64::from_le_bytes(read_run_bytes(reader)?)),
+            1 => {
+                let length = u32::from_le_bytes(read_run_bytes(reader)?) as usize;
+                let mut bytes = vec![0; length];
+                reader.read_exact(&mut bytes)?;
+                SortValue::Text(String::from_utf8(bytes).map_err(|_| invalid())?)
+            }
+            2 => SortValue::Distance(SquaredL2::read_run(reader)?),
+            _ => return Err(invalid()),
+        };
+        keys.push((value, tag & 4 != 0));
+    }
+    Ok(Some(Candidate {
+        keys,
+        primary,
+        position,
+    }))
 }
 fn merge(paths: &[PathBuf], mut emit: impl FnMut(Candidate) -> Result<bool>) -> Result<()> {
     let mut readers: Vec<_> = paths
@@ -830,6 +896,48 @@ mod sort_tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn binary_runs_preserve_text_exact_distance_and_high_position_bits() {
+        let root = std::env::temp_dir().join(format!(
+            "mv-merge-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, AtomicOrdering::Relaxed),
+        ));
+        fs::create_dir(&root).unwrap();
+        let mut runs = Runs::new(root.join("sort"));
+        let keys = vec![
+            (SortValue::Text("你\0\n\"\\".repeat(1024)), true),
+            (SortValue::Int(i64::MIN), false),
+            (
+                SortValue::Distance(SquaredL2::between(
+                    &[f32::MAX, f32::from_bits(1)],
+                    &[-f32::MAX, 0.0],
+                )),
+                true,
+            ),
+        ];
+        let offset = (1 << 63) + 7;
+        let mut rows = vec![Candidate {
+            keys: keys.clone(),
+            primary: i64::MAX,
+            position: Position::Committed(offset),
+        }];
+        runs.spill(&mut rows).unwrap();
+        let paths = runs.final_paths().unwrap();
+        let mut seen = 0;
+        merge(&paths, |candidate| {
+            assert_eq!(candidate.keys, keys);
+            assert_eq!(candidate.primary, i64::MAX);
+            assert!(matches!(candidate.position, Position::Committed(n) if n == offset));
+            seen += 1;
+            Ok(true)
+        })
+        .unwrap();
+        assert_eq!(seen, 1);
+        drop(runs);
+        fs::remove_dir(root).unwrap();
+    }
 
     #[test]
     fn shrinking_fan_in_merges_pending_narrow_runs_in_bounded_batches() {

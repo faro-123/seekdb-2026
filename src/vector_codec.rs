@@ -80,10 +80,9 @@ impl Header {
     }
 }
 
-// Writes nothing on fallback. The old raw field remains byte-for-byte identical.
-pub(crate) fn try_pack(vector: &[f32], out: &mut Vec<u8>) -> bool {
+pub(crate) fn packed_header(vector: &[f32]) -> Option<Header> {
     if vector.len() * 4 <= HEADER_BYTES || vector.len() > MAX_PACKED_DIM {
-        return false;
+        return None;
     }
 
     let mut exponent = 127;
@@ -93,7 +92,7 @@ pub(crate) fn try_pack(vector: &[f32], out: &mut Vec<u8>) -> bool {
         let bits = value.to_bits();
         let magnitude = bits & 0x7fff_ffff;
         if bits == 0x8000_0000 || magnitude >= 0x7f80_0000 {
-            return false;
+            return None;
         }
         low = low.min(value);
         high = high.max(value);
@@ -115,7 +114,7 @@ pub(crate) fn try_pack(vector: &[f32], out: &mut Vec<u8>) -> bool {
     let low = f64::from(low) * inverse;
     let high = f64::from(high) * inverse;
     if low < f64::from(i32::MIN) || high > f64::from(i32::MAX) {
-        return false;
+        return None;
     }
     let base = low as i32;
     let range = (high as i32).abs_diff(base);
@@ -124,32 +123,64 @@ pub(crate) fn try_pack(vector: &[f32], out: &mut Vec<u8>) -> bool {
     let packed_bytes = HEADER_BYTES + (vector.len() * usize::from(width)).div_ceil(8);
     // Pay codec costs only when the payload shrinks by at least one eighth.
     if packed_bytes > raw_bytes - raw_bytes.div_ceil(8) {
-        return false;
+        return None;
     }
 
-    out.reserve(packed_bytes);
-    out.extend_from_slice(&(exponent as i16).to_le_bytes());
-    out.push(width);
-    out.extend_from_slice(&base.to_le_bytes());
-    if width == 0 {
-        return true;
+    Some(Header {
+        exponent: exponent as i16,
+        width,
+        base,
+    })
+}
+
+pub(crate) fn write_packed(
+    header: Header,
+    vector: &[f32],
+    out: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    let mut bytes = [0; HEADER_BYTES];
+    bytes[..2].copy_from_slice(&header.exponent.to_le_bytes());
+    bytes[2] = header.width;
+    bytes[3..].copy_from_slice(&header.base.to_le_bytes());
+    out.write_all(&bytes)?;
+    if header.width == 0 {
+        return Ok(());
     }
+
+    let inverse = power_of_two(-i32::from(header.exponent));
+    let mut buffer = [0; 256];
+    let mut used = 0;
     let mut bucket = 0_u64;
     let mut bits = 0;
     for &value in vector {
         let coefficient = (f64::from(value) * inverse) as i32;
-        let delta = coefficient.abs_diff(base);
+        let delta = coefficient.abs_diff(header.base);
         bucket |= u64::from(delta) << bits;
-        bits += width;
+        bits += header.width;
         while bits >= 8 {
-            out.push(bucket as u8);
+            buffer[used] = bucket as u8;
+            used += 1;
+            if used == buffer.len() {
+                out.write_all(&buffer)?;
+                used = 0;
+            }
             bucket >>= 8;
             bits -= 8;
         }
     }
     if bits != 0 {
-        out.push(bucket as u8);
+        buffer[used] = bucket as u8;
+        used += 1;
     }
+    out.write_all(&buffer[..used])
+}
+
+#[cfg(test)]
+pub(crate) fn try_pack(vector: &[f32], out: &mut Vec<u8>) -> bool {
+    let Some(header) = packed_header(vector) else {
+        return false;
+    };
+    write_packed(header, vector, out).unwrap();
     true
 }
 

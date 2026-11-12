@@ -1,12 +1,12 @@
 //! Exact squared distance keys for finite float32 vectors.
 use std::cmp::Ordering;
 
-use serde::{Deserialize, Serialize};
+use std::io::{self, Read, Write};
 
 // Each float32 is a signed integer times 2^-149. A squared difference
 // needs at most 556 bits in units of 2^-298, and a row has fewer than 2^32
 // dimensions in the storage format. Ten limbs leave room for the sum.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SquaredL2([u64; 10]);
 
 fn parts(value: f32) -> (u64, usize, bool) {
@@ -22,6 +22,21 @@ fn parts(value: f32) -> (u64, usize, bool) {
 }
 
 impl SquaredL2 {
+    pub fn read_run(input: &mut impl Read) -> io::Result<Self> {
+        let mut bytes = [0; 80];
+        input.read_exact(&mut bytes)?;
+        let (words, _) = bytes.as_chunks::<8>();
+        Ok(Self(std::array::from_fn(|i| u64::from_le_bytes(words[i]))))
+    }
+
+    pub fn write_run(&self, out: &mut impl Write) -> io::Result<()> {
+        let mut bytes = [0; 80];
+        for (word, value) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(self.0) {
+            *word = value.to_le_bytes();
+        }
+        out.write_all(&bytes)
+    }
+
     pub fn between(row: &[f32], query: &[f32]) -> Self {
         let mut sum = Self([0; 10]);
         for (&a, &b) in row.iter().zip(query) {
