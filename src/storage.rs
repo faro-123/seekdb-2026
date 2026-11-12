@@ -20,6 +20,10 @@ const HEADER: &[u8; 8] = b"MVTX0001";
 const COMMIT: &[u8; 8] = b"COMMIT01";
 const BLOCK_HEADER: &[u8; 8] = b"MVTX0002";
 const BLOCK_COMMIT: &[u8; 8] = b"COMMIT02";
+const ALIGNED_HEADER: &[u8; 8] = b"MVTX0003";
+const ALIGNED_COMMIT: &[u8; 8] = b"COMMIT03";
+const WAL_ALIGNMENT: u64 = 4096;
+static ZERO_PADDING: [u8; WAL_ALIGNMENT as usize] = [0; WAL_ALIGNMENT as usize];
 // Excludes the input, which is either an already charged stage or a separately
 // reserved disk read. Includes output, descriptors, dictionaries and stack scratch.
 const BLOCK_ENCODE_WORKSPACE: usize = 576 << 10;
@@ -32,6 +36,71 @@ fn checksum(mut hash: u64, buf: &[u8]) -> u64 {
 }
 fn corrupt(message: &str) -> Error {
     Error::new("storage_error", message)
+}
+
+#[derive(Clone, Copy)]
+enum CommitFormat {
+    Legacy,
+    Compact,
+    Aligned,
+}
+
+impl CommitFormat {
+    fn read(header: &[u8]) -> Result<Self> {
+        match header {
+            bytes if bytes == HEADER => Ok(Self::Legacy),
+            bytes if bytes == BLOCK_HEADER => Ok(Self::Compact),
+            bytes if bytes == ALIGNED_HEADER => Ok(Self::Aligned),
+            _ => Err(corrupt("invalid commit header")),
+        }
+    }
+
+    fn header(self) -> &'static [u8; 8] {
+        match self {
+            Self::Legacy => HEADER,
+            Self::Compact => BLOCK_HEADER,
+            Self::Aligned => ALIGNED_HEADER,
+        }
+    }
+
+    fn footer(self) -> &'static [u8; 8] {
+        match self {
+            Self::Legacy => COMMIT,
+            Self::Compact => BLOCK_COMMIT,
+            Self::Aligned => ALIGNED_COMMIT,
+        }
+    }
+
+    fn compact(self) -> bool {
+        matches!(self, Self::Compact | Self::Aligned)
+    }
+
+    // A version 3 frame is header, original compact payload, zero padding,
+    // then footer. The header length still counts only the original payload.
+    fn extent(self, start: u64, len: u64) -> Result<(u64, usize)> {
+        let end = start
+            .checked_add(32)
+            .and_then(|pos| pos.checked_add(len))
+            .ok_or_else(|| corrupt("commit length overflow"))?;
+        if matches!(self, Self::Aligned) {
+            let aligned = end
+                .checked_next_multiple_of(WAL_ALIGNMENT)
+                .ok_or_else(|| corrupt("aligned commit length overflow"))?;
+            Ok((aligned, (aligned - end) as usize))
+        } else {
+            Ok((end, 0))
+        }
+    }
+
+    fn for_compact(start: u64, len: u64) -> Result<Self> {
+        let (_, padding) = Self::Aligned.extent(start, len)?;
+        // Cap physical layout overhead for small or incompressible frames.
+        if padding != 0 && padding as u64 <= (len + 32) / 8 {
+            Ok(Self::Aligned)
+        } else {
+            Ok(Self::Compact)
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -830,19 +899,13 @@ impl Store {
             reader.seek(SeekFrom::Start(pos))?;
             let mut header = [0; 16];
             reader.read_exact(&mut header)?;
-            let compact = match &header[..8] {
-                bytes if bytes == HEADER => false,
-                bytes if bytes == BLOCK_HEADER => true,
-                _ => return Err(corrupt("invalid commit header")),
-            };
+            let format = CommitFormat::read(&header[..8])?;
             let len = u64::from_le_bytes(header[8..16].try_into().unwrap());
-            let Some(end) = pos.checked_add(32).and_then(|p| p.checked_add(len)) else {
-                return Err(corrupt("commit length overflow"));
-            };
+            let (end, padding) = format.extent(pos, len)?;
             if end > size {
                 break;
             }
-            if compact && len > commit_block::MAX_INPUT_BYTES as u64 {
+            if format.compact() && len > commit_block::MAX_INPUT_BYTES as u64 {
                 return Err(corrupt("compact commit exceeds format limit"));
             }
             let mut left = len;
@@ -853,14 +916,18 @@ impl Store {
                 hash = checksum(hash, &buffer[..n]);
                 left -= u64::try_from(n).unwrap();
             }
+            reader.read_exact(&mut buffer[..padding])?;
+            if buffer[..padding].iter().any(|&byte| byte != 0) {
+                return Err(corrupt("nonzero aligned commit padding"));
+            }
             let mut footer = [0; 16];
             reader.read_exact(&mut footer)?;
-            let marker = if compact { BLOCK_COMMIT } else { COMMIT };
-            if &footer[..8] != marker || u64::from_le_bytes(footer[8..].try_into().unwrap()) != hash
+            if &footer[..8] != format.footer()
+                || u64::from_le_bytes(footer[8..].try_into().unwrap()) != hash
             {
                 return Err(corrupt("committed frame checksum mismatch"));
             }
-            self.replay(pos + 16, len, compact)?;
+            self.replay(pos + 16, len, format.compact())?;
             pos = end;
         }
         if pos != size {
@@ -889,7 +956,7 @@ impl Store {
         } else {
             None
         };
-        let mut compact = false;
+        let mut format = CommitFormat::Legacy;
         let hash = if let Some(_reservation) = reservation {
             let disk_input;
             let input = if let Some(bytes) = staged {
@@ -903,11 +970,12 @@ impl Store {
             let payload = commit_block::pack_payload(input, |table| {
                 changes.catalog.get(table).map(|schema| schema.primary)
             })?;
-            compact = payload.is_some();
+            if let Some(payload) = &payload {
+                format = CommitFormat::for_compact(pos, payload.len() as u64)?;
+            }
             let payload = payload.as_deref().unwrap_or(input);
             len = payload.len() as u64;
-            self.wal
-                .write_all(if compact { BLOCK_HEADER } else { HEADER })?;
+            self.wal.write_all(format.header())?;
             self.wal.write_all(&len.to_le_bytes())?;
             self.wal.write_all(payload)?;
             checksum(FNV, payload)
@@ -933,13 +1001,14 @@ impl Store {
             }
         };
         drop(positions);
-        self.wal
-            .write_all(if compact { BLOCK_COMMIT } else { COMMIT })?;
+        let (end, padding) = format.extent(pos, len)?;
+        self.wal.write_all(&ZERO_PADDING[..padding])?;
+        self.wal.write_all(format.footer())?;
         self.wal.write_all(&hash.to_le_bytes())?;
         // This is the only commit acknowledgement gate. Derived indexes need no fsync.
         self.wal.sync_all()?;
-        self.replay(pos + 16, len, compact)?;
-        self.committed_end = pos + len + 32;
+        self.replay(pos + 16, len, format.compact())?;
+        self.committed_end = end;
         Ok(())
     }
 
@@ -1335,6 +1404,110 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aligned_commit_restarts_with_old_frames_and_discards_a_torn_footer() {
+        let path = std::env::temp_dir().join(format!(
+            "mv-aligned-frame-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut store = Store::open(&path).unwrap();
+        let mut schema = store.changes(store.catalog.clone()).unwrap();
+        schema
+            .push(Op::Schema(Schema {
+                name: "t".into(),
+                primary: 0,
+                columns: vec![
+                    crate::types::Column {
+                        name: "id".into(),
+                        kind: DataType::Bigint,
+                        primary: true,
+                    },
+                    crate::types::Column {
+                        name: "body".into(),
+                        kind: DataType::Varchar(300),
+                        primary: false,
+                    },
+                ],
+                indexes: vec![],
+            }))
+            .unwrap();
+        store.commit(&schema).unwrap();
+        drop(schema);
+        let mut small = store.changes(store.catalog.clone()).unwrap();
+        for key in [0, 1] {
+            small
+                .push(Op::Put {
+                    table: "t".into(),
+                    key,
+                    row: vec![Value::Int(key), Value::Text("tiny".into())],
+                })
+                .unwrap();
+        }
+        store.commit(&small).unwrap();
+        drop(small);
+        let path_wal = path.join("commits.mv1");
+        let prefix = std::fs::read(&path_wal).unwrap();
+        assert!(prefix.starts_with(b"MVTX0001"));
+        assert!(prefix.windows(8).any(|bytes| bytes == b"MVTX0002"));
+        let mut wide = store.changes(store.catalog.clone()).unwrap();
+        let mut rng = 43_u32;
+        for key in 2..130 {
+            let body: String = (0..300)
+                .map(|_| {
+                    rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    char::from(b'a' + ((rng >> 16) % 26) as u8)
+                })
+                .collect();
+            wide.push(Op::Put {
+                table: "t".into(),
+                key,
+                row: vec![Value::Int(key), Value::Text(body)],
+            })
+            .unwrap();
+        }
+        store.commit(&wide).unwrap();
+        drop(wide);
+        drop(store);
+        let full = std::fs::read(&path_wal).unwrap();
+        assert_eq!(&full[..prefix.len()], &prefix);
+        assert_eq!(&full[prefix.len()..prefix.len() + 8], b"MVTX0003");
+        assert_eq!(full.len() % 4096, 0);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .view("t", None)
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .len(),
+            130
+        );
+        drop(store);
+        OpenOptions::new()
+            .write(true)
+            .open(&path_wal)
+            .unwrap()
+            .set_len((full.len() - 1) as u64)
+            .unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .view("t", None)
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(std::fs::read(&path_wal).unwrap(), prefix);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     #[test]
     fn writes_and_recovery_do_not_materialize_a_query_cache() {
