@@ -7,6 +7,7 @@ use std::mem::size_of;
 use crate::committed_cache::CommittedView;
 use crate::distance::{DistanceBounds, SquaredL2, supports_compact_screening};
 use crate::half;
+use crate::hot_text::{HotText, TextShape};
 use crate::packed_hot::{self, EncodedCoefficients, Kernel};
 use crate::storage::VectorData;
 use crate::storage::{Field, HotRead, Store};
@@ -30,7 +31,7 @@ pub(crate) struct HotRow {
 
 enum Scalar {
     Int(Vec<i64>),
-    Text { offsets: Vec<usize>, bytes: Vec<u8> },
+    Text(HotText),
 }
 
 struct HotColumn {
@@ -294,7 +295,13 @@ impl HotTable {
             || self.columns.iter().any(|cached| cached.index == column)
     }
 
-    pub fn write_scalar(&self, slot: usize, column: usize, out: &mut impl Write) -> Result<()> {
+    pub fn write_scalar(
+        &self,
+        slot: usize,
+        column: usize,
+        out: &mut impl Write,
+        scratch: &mut Vec<u8>,
+    ) -> Result<()> {
         let cached = self
             .columns
             .iter()
@@ -302,8 +309,8 @@ impl HotTable {
             .ok_or_else(|| Error::new("storage_error", "missing hot projection column"))?;
         match &cached.values {
             Scalar::Int(values) => serde_json::to_writer(out, &values[slot])?,
-            Scalar::Text { offsets, bytes } => {
-                let text = std::str::from_utf8(&bytes[offsets[slot]..offsets[slot + 1]])
+            Scalar::Text(values) => {
+                let text = std::str::from_utf8(values.value(slot, scratch))
                     .map_err(|_| Error::new("storage_error", "invalid hot text"))?;
                 serde_json::to_writer(out, text)?;
             }
@@ -325,9 +332,7 @@ impl HotTable {
             .expect("cached predicate");
         match (&col.values, wanted) {
             (Scalar::Int(values), Value::Int(n)) => values[slot].cmp(n),
-            (Scalar::Text { offsets, bytes }, Value::Text(s)) => {
-                bytes[offsets[slot]..offsets[slot + 1]].cmp(s.as_bytes())
-            }
+            (Scalar::Text(values), Value::Text(s)) => values.compare(slot, s.as_bytes()),
             _ => unreachable!("typed scalar comparison"),
         }
     }
@@ -527,6 +532,9 @@ impl HotTable {
         // Use the same fixed body buffer for both passes and borrow fields from it.
         let mut buffer = vec![0; MAX_BODY];
         let mut text_bytes = [0; MAX_FIELDS];
+        // At most 4 KiB per sampled column during the first pass.
+        let mut text_shapes: [TextShape; MAX_FIELDS] =
+            std::array::from_fn(|_| TextShape::default());
         let mut rows = 0;
         let mut packed = 0;
         let mut exponent = None;
@@ -586,6 +594,9 @@ impl HotTable {
                 Cell::Scalar(col, Field::Text(value)) => {
                     bytes += value.len();
                     text_bytes[col] += value.len();
+                    if integer {
+                        text_shapes[col].observe(value);
+                    }
                 }
                 _ => {}
             }
@@ -637,14 +648,9 @@ impl HotTable {
                     index,
                     values: match schema.columns[index].kind {
                         DataType::Bigint => Scalar::Int(Vec::with_capacity(rows)),
-                        DataType::Varchar(_) => {
-                            let mut offsets = Vec::with_capacity(rows + 1);
-                            offsets.push(0);
-                            Scalar::Text {
-                                offsets,
-                                bytes: Vec::with_capacity(text_bytes[i]),
-                            }
-                        }
+                        DataType::Varchar(_) => Scalar::Text(
+                            std::mem::take(&mut text_shapes[i]).allocate(rows, text_bytes[i]),
+                        ),
                         DataType::Vector(_) => unreachable!("validated scalar column"),
                     },
                 })
@@ -711,12 +717,10 @@ impl HotTable {
                     (Scalar::Int(values), Field::Int(b)) if values.len() < rows => {
                         values.push(i64::from_le_bytes(*b));
                     }
-                    (Scalar::Text { offsets, bytes }, Field::Text(value))
-                        if offsets.len() <= rows
-                            && value.len() <= text_bytes[col] - bytes.len() =>
-                    {
-                        bytes.extend_from_slice(value);
-                        offsets.push(bytes.len());
+                    (Scalar::Text(values), Field::Text(value)) => {
+                        if !values.push(table.rows.len() - 1, value) {
+                            return Ok(false);
+                        }
                     }
                     _ => return Ok(false),
                 },

@@ -6,6 +6,7 @@ mod distance;
 mod engine;
 mod half;
 mod hot;
+mod hot_text;
 mod packed_hot;
 mod position_index;
 mod protocol;

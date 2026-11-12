@@ -710,6 +710,7 @@ fn try_hot(
         Some(store.view(&schema.name, None)?)
     };
     let mut expanded = Vec::new();
+    let mut text_scratch = Vec::new();
     for hit in hits {
         let row = table.row(hit.slot);
         if let Some(source) = &mut source {
@@ -724,7 +725,9 @@ fn try_hot(
                     BoundExpr::Column(i) if i == embedding => {
                         Value::write_vector_json(table.vector(hit.slot, &mut expanded)?, out)?
                     }
-                    BoundExpr::Column(i) => table.write_scalar(hit.slot, *i, out)?,
+                    BoundExpr::Column(i) => {
+                        table.write_scalar(hit.slot, *i, out, &mut text_scratch)?
+                    }
                     BoundExpr::Distance(_, query) => {
                         let distance = if query == q {
                             hit.distance()
