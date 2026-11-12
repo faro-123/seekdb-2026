@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 
@@ -20,8 +21,13 @@ struct Request<'a> {
     search_mode: Option<&'a RawValue>,
 }
 
-fn request_text(field: Option<&RawValue>) -> Option<String> {
-    serde_json::from_str(field?.get()).ok()
+#[derive(Deserialize)]
+struct RequestText<'a>(#[serde(borrow)] Cow<'a, str>);
+
+fn request_text(field: Option<&RawValue>) -> Option<Cow<'_, str>> {
+    serde_json::from_str::<RequestText<'_>>(field?.get())
+        .ok()
+        .map(|text| text.0)
 }
 
 fn respond(out: &mut impl Write, id: Option<&RawValue>, result: Result<Outcome>) -> io::Result<()> {

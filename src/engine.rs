@@ -149,6 +149,7 @@ impl Engine {
                 };
                 let mut count = 0;
                 for literals in rows {
+                    let literals = literals?;
                     if literals.len() != mapping.len() {
                         return Err(Error::new(
                             "column_count",
