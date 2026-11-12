@@ -1034,6 +1034,21 @@ impl Store {
         }
     }
 
+    pub fn committed_len(&self) -> u64 {
+        self.committed_end
+    }
+
+    /// Convert an index location to the earliest physical byte a row needs.
+    pub fn committed_row_start(offset: u64) -> u64 {
+        BlockPosition::unpack(offset).map_or(offset, |block| block.start)
+    }
+
+    /// Hot construction only visits committed rows, after the WAL has synced.
+    /// Advice cannot extend into a partial or uncommitted tail.
+    pub fn release_consumed_pages(&self, start: u64, end: u64) {
+        committed_cache::release_file_range(&self.wal, start, end.min(self.committed_end));
+    }
+
     fn wal_reader(&self) -> Result<WalRead> {
         Ok(match &self.committed_cache {
             Some(cache) => WalRead::cached(File::open(&self.path)?, CommittedCache::view(cache)),

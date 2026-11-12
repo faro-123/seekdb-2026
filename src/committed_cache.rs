@@ -92,7 +92,13 @@ impl CommittedCache {
 
 /// Release clean whole pages only after the complete prefix has another owner.
 pub(crate) fn release_file_pages(file: &File, end: u64) {
-    #[cfg(target_os = "linux")]
+    release_file_range(file, 0, end);
+}
+
+/// Advance a consumed prefix from `start` to `end`. Keep the trailing
+/// partial page until a later range completes it.
+pub(crate) fn release_file_range(file: &File, start: u64, end: u64) {
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
     {
         use std::os::fd::AsRawFd;
         #[allow(unsafe_code)]
@@ -106,17 +112,19 @@ pub(crate) fn release_file_pages(file: &File, end: u64) {
         unsafe {
             let page = getpagesize();
             if page > 0 {
-                let end = end / page as u64 * page as u64;
-                if let Ok(end) = i64::try_from(end)
-                    && end > 0
+                let page = page as u64;
+                let start = start / page * page;
+                let end = end / page * page;
+                if start < end
+                    && let (Ok(start), Ok(end)) = (i64::try_from(start), i64::try_from(end))
                 {
-                    let _ = posix_fadvise(file.as_raw_fd(), 0, end, 4);
+                    let _ = posix_fadvise(file.as_raw_fd(), start, end - start, 4);
                 }
             }
         }
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = (file, end);
+    #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+    let _ = (file, start, end);
 }
 
 #[cfg(test)]

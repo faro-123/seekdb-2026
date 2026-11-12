@@ -700,10 +700,10 @@ fn try_hot(
         return Ok(false);
     };
     let hits = table.select(q, k, |slot| plan.predicates.matches_hot(table, slot))?;
-    let covered = plan.projections.iter().all(|expr| {
-        let column = expr.column_index();
-        column == schema.primary || column == *embedding
-    });
+    let covered = plan
+        .projections
+        .iter()
+        .all(|expr| table.covers(expr.column_index()));
     let mut source = if covered || hits.is_empty() {
         None
     } else {
@@ -721,9 +721,10 @@ fn try_hot(
                     BoundExpr::Column(i) if *i == schema.primary => {
                         serde_json::to_writer(out, &row.key)?;
                     }
-                    BoundExpr::Column(_) => {
+                    BoundExpr::Column(i) if i == embedding => {
                         Value::write_vector_json(table.vector(hit.slot, &mut expanded)?, out)?
                     }
+                    BoundExpr::Column(i) => table.write_scalar(hit.slot, *i, out)?,
                     BoundExpr::Distance(_, query) => {
                         let distance = if query == q {
                             hit.distance()

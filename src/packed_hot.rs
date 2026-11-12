@@ -22,6 +22,43 @@ impl Header {
     }
 }
 
+pub(crate) struct EncodedCoefficients<'a> {
+    header: Header,
+    payload: &'a [u8],
+    count: usize,
+    pub exponent: i16,
+}
+
+impl<'a> EncodedCoefficients<'a> {
+    pub fn new(header: VectorHeader, count: usize, payload: &'a [u8]) -> Option<Self> {
+        let (exponent, width, base) = header.components();
+        let layout = Header {
+            base,
+            width: usize::from(width),
+        };
+        if !(MIN_EXPONENT..=MAX_EXPONENT).contains(&exponent)
+            || !layout.coefficients_fit()
+            || header.payload_len(count).ok()? != payload.len()
+        {
+            return None;
+        }
+        let remainder = (count * layout.width) % 8;
+        if remainder != 0 && payload.last().is_some_and(|last| last >> remainder != 0) {
+            return None;
+        }
+        Some(Self {
+            header: layout,
+            payload,
+            count,
+            exponent,
+        })
+    }
+
+    pub fn append_to(self, out: &mut Vec<i16>) {
+        out.extend((0..self.count).map(|i| scalar_at(self.payload, i, self.header)));
+    }
+}
+
 /// Interpret the first field of a WAL suffix. The field may be followed by
 /// other records or fields. Return only the encoded bytes used by this vector.
 pub(crate) fn layout(bytes: &[u8], dim: usize) -> Option<(i16, u8, i16, &[u8])> {
@@ -31,24 +68,16 @@ pub(crate) fn layout(bytes: &[u8], dim: usize) -> Option<(i16, u8, i16, &[u8])> 
     {
         return None;
     }
-    let codec_bytes = header_bytes[5..].try_into().ok()?;
-    let exponent = i16::from_le_bytes(header_bytes[5..7].try_into().ok()?);
-    let width = header_bytes[7];
-    let base = i32::from_le_bytes(header_bytes[8..12].try_into().ok()?);
-    let header = Header {
-        base,
-        width: usize::from(width),
-    };
-    if !(MIN_EXPONENT..=MAX_EXPONENT).contains(&exponent) || !header.coefficients_fit() {
-        return None;
-    }
-    let len = VectorHeader::parse(codec_bytes).payload_len(dim).ok()?;
+    let header = VectorHeader::parse(header_bytes[5..].try_into().ok()?);
+    let len = header.payload_len(dim).ok()?;
     let payload = tail.get(..len)?;
-    let remainder = (dim * header.width) % 8;
-    if remainder != 0 && payload.last().is_some_and(|last| last >> remainder != 0) {
-        return None;
-    }
-    Some((exponent, width, i16::try_from(base).ok()?, payload))
+    let codes = EncodedCoefficients::new(header, dim, payload)?;
+    Some((
+        codes.exponent,
+        codes.header.width as u8,
+        codes.header.base as i16,
+        payload,
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -86,6 +115,27 @@ impl Kernel {
             && query
                 .iter()
                 .all(|&value| coefficient(value, exponent).is_some())
+    }
+
+    /// Both slices contain validated coefficients in [-4095, 4095].
+    #[cfg_attr(target_arch = "x86_64", allow(unsafe_code))]
+    pub(crate) fn expanded_distance(self, row: &[i16], query: &[i16]) -> u64 {
+        assert_eq!(row.len(), query.len());
+        assert!(row.len() <= MAX_DIMENSION);
+        debug_assert!(
+            row.iter()
+                .chain(query)
+                .all(|&v| i32::from(v).abs() <= MAX_COEFFICIENT)
+        );
+        #[cfg(target_arch = "x86_64")]
+        {
+            // SAFETY: construction requires AVX2. The kernel loads complete chunks.
+            unsafe { simd::expanded(row, query) }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            row.iter().zip(query).map(|(&a, &b)| squared(a, b)).sum()
+        }
     }
 
     /// The caller obtains width/base and payload from layout and the query
@@ -250,6 +300,35 @@ mod simd {
     }
 
     #[target_feature(enable = "avx2")]
+    pub(super) fn expanded(row: &[i16], query: &[i16]) -> u64 {
+        let (rows, tail) = row.as_chunks::<16>();
+        let (queries, query_tail) = query.as_chunks::<16>();
+        let mut total = 0;
+        for (row, query) in rows.chunks(16).zip(queries.chunks(16)) {
+            let mut sum = _mm256_setzero_si256();
+            for (a, b) in row.iter().zip(query) {
+                // SAFETY: each array holds exactly 32 readable bytes.
+                let (a, b) = unsafe {
+                    (
+                        _mm256_loadu_si256(a.as_ptr().cast()),
+                        _mm256_loadu_si256(b.as_ptr().cast()),
+                    )
+                };
+                let delta = _mm256_sub_epi16(a, b);
+                sum = _mm256_add_epi32(sum, _mm256_madd_epi16(delta, delta));
+            }
+            // At most 32 * 8190^2 per lane before widening.
+            total += widen(sum);
+        }
+        total
+            + tail
+                .iter()
+                .zip(query_tail)
+                .map(|(&a, &b)| squared(a, b))
+                .sum::<u64>()
+    }
+
+    #[target_feature(enable = "avx2")]
     pub(super) fn packed(payload: &[u8], header: Header, query: &[i16]) -> u64 {
         let width = header.width;
         let plan = &PLANS[width];
@@ -336,6 +415,7 @@ mod tests {
                     truth,
                     "width {width}, n {n}"
                 );
+                assert_eq!(kernel.expanded_distance(&row, &query), truth);
             }
         }
         assert_eq!(
