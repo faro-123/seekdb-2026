@@ -25,7 +25,7 @@ JSONL
 
 镜像默认以 UID/GID `0:0` 启动，以兼容 root 拥有的私有 `/data` 绑定目录。复用旧镜像以 UID/GID `10001:10001` 创建的本地数据卷时，在 `docker run` 增加 `--user 10001:10001`。
 
-运行期间由数据库独占管理数据目录，离线维护前先关闭数据库。Linux amd64 的压缩向量查询可以映射已恢复的 WAL 前缀。调试时可用 `MINIVECTORDB_PACKED_HOT=0` 关闭此查询路径。
+运行期间由数据库独占管理数据目录，离线维护前先关闭数据库。已提交字节缓存与查询快照共用 8 MiB 热预算，完整 WAL 超过 4 MiB 时回退文件读取。可用 `MINIVECTORDB_COMMITTED_BYTES=0` 关闭已提交字节缓存，或 `MINIVECTORDB_PACKED_HOT=0` 单独关闭压缩向量扫描。
 
 ## 存储和执行
 

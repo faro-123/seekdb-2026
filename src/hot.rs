@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::mem::size_of;
 
+use crate::committed_cache::CommittedView;
 use crate::distance::{DistanceBounds, SquaredL2, supports_compact_screening};
 use crate::half;
 use crate::packed_hot::{self, Kernel};
@@ -10,7 +11,6 @@ use crate::storage::VectorData;
 use crate::storage::{Field, HotRead, Store};
 use crate::types::{DataType, Schema, Value};
 use crate::vector_codec::{HEADER_BYTES, Header};
-use crate::wal_map::WalMap;
 use crate::{Error, Result};
 
 const WORK_BYTES: usize = 1 << 20;
@@ -56,7 +56,7 @@ struct PackedLocation {
 }
 
 impl PackedLocation {
-    fn from_field(map: &WalMap, at: Option<u64>, dim: usize) -> Option<(i16, Self)> {
+    fn from_field(map: &CommittedView, at: Option<u64>, dim: usize) -> Option<(i16, Self)> {
         let offset = usize::try_from(at?).ok()?;
         let (exponent, width, base, _) = packed_hot::layout(map.bytes().get(offset..)?, dim)?;
         let payload = u32::try_from(offset + 5 + HEADER_BYTES).ok()?;
@@ -70,14 +70,14 @@ impl PackedLocation {
         ))
     }
 
-    fn payload<'a>(&self, map: &'a WalMap, dim: usize) -> &'a [u8] {
+    fn payload<'a>(&self, map: &'a CommittedView, dim: usize) -> &'a [u8] {
         let offset = self.payload as usize;
         &map.bytes()[offset..][..(dim * usize::from(self.width)).div_ceil(8)]
     }
 }
 
 struct PackedSnapshot {
-    map: WalMap,
+    map: CommittedView,
     kernel: Kernel,
     exponent: i16,
     locations: Vec<PackedLocation>,
@@ -88,7 +88,7 @@ enum VectorBuild<'a> {
         half: bool,
     },
     Mapped {
-        map: WalMap,
+        map: CommittedView,
         kernel: Kernel,
         query: &'a [f32],
     },
@@ -684,7 +684,11 @@ impl HotCache {
         if schema.name.len() > 4096 {
             return Ok(None);
         }
-        let Some(budget) = self.budget.checked_sub(WORK_BYTES).filter(|n| *n > 0) else {
+        let Some(budget) = self
+            .budget
+            .checked_sub(WORK_BYTES + store.cached_bytes())
+            .filter(|n| *n > 0)
+        else {
             return Ok(None);
         };
         // Small fixed workspace even for SQL with many duplicate predicates.
@@ -724,8 +728,7 @@ impl HotCache {
         self.invalidate();
         union[..count].sort_unstable();
         if let Some((kernel, query)) = try_mapped
-            && let Some(map) = store.map_committed(budget)
-            && let Some(budget) = budget.checked_sub(map.bytes().len().next_multiple_of(4096))
+            && let Some(map) = store.cached_committed()
             && let Some(table) = HotTable::build(
                 store,
                 schema,

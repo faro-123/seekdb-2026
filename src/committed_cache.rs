@@ -1,0 +1,158 @@
+//! Owned, bounded bytes of the complete validated WAL, shared with read views.
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::rc::Rc;
+
+use crate::Result;
+
+pub(crate) const MAX_BYTES: usize = 4 << 20;
+const INITIAL_BYTES: usize = 64 << 10;
+const OWNER_BYTES: usize = 128;
+
+pub(crate) struct CommittedCache {
+    bytes: Vec<u8>,
+}
+
+#[derive(Clone)]
+pub(crate) struct CommittedView(Rc<CommittedCache>);
+
+impl CommittedView {
+    pub fn bytes(&self) -> &[u8] {
+        &self.0.bytes
+    }
+}
+
+impl AsRef<[u8]> for CommittedView {
+    fn as_ref(&self) -> &[u8] {
+        self.bytes()
+    }
+}
+
+impl CommittedCache {
+    pub fn refresh(
+        previous: Option<Rc<Self>>,
+        file: &File,
+        end: u64,
+        limit: usize,
+    ) -> Result<Option<Rc<Self>>> {
+        let Ok(end) = usize::try_from(end) else {
+            return Ok(None);
+        };
+        let payload_limit = limit.min(MAX_BYTES).saturating_sub(OWNER_BYTES);
+        if end > payload_limit || payload_limit == 0 {
+            return Ok(None);
+        }
+        let mut owner = previous.unwrap_or_else(|| Rc::new(Self { bytes: Vec::new() }));
+        // A retained reader continues to own its complete generation. Do not
+        // copy it to make room for a new one.
+        let Some(cache) = Rc::get_mut(&mut owner) else {
+            return Ok(None);
+        };
+        if cache.bytes.len() > end {
+            return Ok(None);
+        }
+        if end > cache.bytes.capacity() {
+            let capacity = end
+                .next_power_of_two()
+                .max(INITIAL_BYTES)
+                .min(payload_limit);
+            // At most 2 MiB old + 4 MiB new + the query workspace. The hot
+            // snapshot is released before any commit can reach this point.
+            let mut next = Vec::with_capacity(capacity);
+            next.extend_from_slice(&cache.bytes);
+            cache.bytes = next;
+        }
+        let start = cache.bytes.len();
+        cache.bytes.resize(end, 0);
+        let mut reader = file.try_clone()?;
+        reader.seek(SeekFrom::Start(start as u64))?;
+        reader.read_exact(&mut cache.bytes[start..])?;
+        Ok(Some(owner))
+    }
+
+    pub fn view(owner: &Rc<Self>) -> CommittedView {
+        CommittedView(Rc::clone(owner))
+    }
+
+    pub fn allocated(&self) -> usize {
+        self.bytes.capacity() + OWNER_BYTES
+    }
+}
+
+/// Release clean whole pages only after the complete prefix has another owner.
+pub(crate) fn release_file_pages(file: &File, end: u64) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        #[allow(unsafe_code)]
+        unsafe extern "C" {
+            fn getpagesize() -> i32;
+            fn posix_fadvise(fd: i32, offset: i64, len: i64, advice: i32) -> i32;
+        }
+        // SAFETY: the fd is live. The advisory call changes cache residency,
+        // never file contents. Keep the partial page used by the next append.
+        #[allow(unsafe_code)]
+        unsafe {
+            let page = getpagesize();
+            if page > 0 {
+                let end = end / page as u64 * page as u64;
+                if let Ok(end) = i64::try_from(end)
+                    && end > 0
+                {
+                    let _ = posix_fadvise(file.as_raw_fd(), 0, end, 4);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (file, end);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    #[test]
+    fn readers_pin_old_bytes_and_oversized_wal_falls_back() {
+        let path = std::env::temp_dir().join(format!(
+            "mv-committed-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"old").unwrap();
+        let owner = CommittedCache::refresh(None, &file, 3, MAX_BYTES)
+            .unwrap()
+            .unwrap();
+        let old = CommittedCache::view(&owner);
+        file.seek(SeekFrom::End(0)).unwrap();
+        file.write_all(b"-new").unwrap();
+        assert!(
+            CommittedCache::refresh(Some(owner), &file, 7, MAX_BYTES)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(old.bytes(), b"old");
+        let fresh = CommittedCache::refresh(None, &file, 7, MAX_BYTES)
+            .unwrap()
+            .unwrap();
+        assert_eq!(CommittedCache::view(&fresh).bytes(), b"old-new");
+        assert!(
+            CommittedCache::refresh(Some(fresh), &file, MAX_BYTES as u64, MAX_BYTES)
+                .unwrap()
+                .is_none()
+        );
+        drop((old, file));
+        std::fs::remove_file(path).unwrap();
+    }
+}

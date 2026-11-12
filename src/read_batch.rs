@@ -1,8 +1,9 @@
 //! Query-local ordering and buffered reads of immutable committed WAL positions.
 use std::fs::File;
-use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 
 use crate::Result;
+use crate::committed_cache::CommittedView;
 use crate::disk_index::Entry;
 use crate::stage::StageRead;
 
@@ -146,6 +147,7 @@ impl<R: Read + Seek> Seek for BufferedFile<R> {
 
 pub(crate) enum WalRead {
     Direct(File),
+    Cached(Cursor<CommittedView>),
     Buffered(BufferedFile<File>),
     Stage(StageRead),
 }
@@ -169,6 +171,7 @@ impl Read for WalRead {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::Direct(file) => file.read(out),
+            Self::Cached(reader) => reader.read(out),
             Self::Buffered(reader) => reader.read(out),
             Self::Stage(reader) => reader.read(out),
         }
@@ -179,6 +182,7 @@ impl Seek for WalRead {
     fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
         match self {
             Self::Direct(file) => file.seek(from),
+            Self::Cached(reader) => reader.seek(from),
             Self::Buffered(reader) => reader.seek(from),
             Self::Stage(reader) => reader.seek(from),
         }

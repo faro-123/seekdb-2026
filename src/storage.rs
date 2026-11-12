@@ -6,13 +6,13 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::commit_block::{self, Block, RestoredRow};
+use crate::committed_cache::{self, CommittedCache, CommittedView};
 use crate::disk_index::{DiskIndex, Entries, Entry};
 use crate::position_index::{PositionBudget, PositionEntries, PositionIndex, PositionReader};
 use crate::read_batch::{OffsetBatch, WalRead};
 use crate::stage::{Budget, Reservation, Stage};
 use crate::types::{DataType, Schema, Value};
 use crate::vector_codec::{self, HEADER_BYTES, Header as PackedHeader};
-use crate::wal_map::WalMap;
 use crate::{Error, Result};
 
 pub(crate) type Catalog = BTreeMap<String, Schema>;
@@ -578,6 +578,8 @@ pub(crate) struct Store {
     vectors: BTreeMap<String, PositionIndex>,
     wal: File,
     committed_end: u64,
+    committed_cache: Option<Rc<CommittedCache>>,
+    committed_limit: usize,
     path: PathBuf,
     scratch: PathBuf,
     sequence: u64,
@@ -627,12 +629,24 @@ impl Store {
             .unwrap_or(MAX_POSITION_BYTES)
             .min(MAX_POSITION_BYTES);
         let position_budget = PositionBudget::new(stage_budget.clone(), position_bytes);
+        let hot_bytes = std::env::var("MINIVECTORDB_HOT_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(8 << 20)
+            .min(8 << 20);
         let mut store = Self {
             catalog: Catalog::new(),
             indexes: BTreeMap::new(),
             vectors: BTreeMap::new(),
             wal,
             committed_end: 0,
+            committed_cache: None,
+            committed_limit: std::env::var("MINIVECTORDB_COMMITTED_BYTES")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(committed_cache::MAX_BYTES)
+                .min(committed_cache::MAX_BYTES)
+                .min(hot_bytes.saturating_sub(1 << 20)),
             path,
             scratch,
             sequence: 0,
@@ -699,7 +713,7 @@ impl Store {
         // A flat index points directly into committed binary vector payloads.
         // It can be rebuilt from the same row versions as the primary index.
         let mut index = PositionIndex::create(self.temp("vectors"), self.position_budget.clone())?;
-        let mut log = WalRead::Direct(File::open(&self.path)?).buffered();
+        let mut log = self.wal_reader()?.buffered();
         let mut blocks = BlockReader::new(self.stage_budget.clone());
         let mut slots = OffsetBatch::new(self.indexes[table].entries()?).ordered();
         while let Some(slot) = slots.next() {
@@ -853,6 +867,7 @@ impl Store {
         }
         self.wal.seek(SeekFrom::End(0))?;
         self.committed_end = pos;
+        self.refresh_cache(None)?;
         Ok(())
     }
     pub fn commit(&mut self, changes: &Changes) -> Result<()> {
@@ -921,26 +936,45 @@ impl Store {
         self.wal.write_all(&hash.to_le_bytes())?;
         // This is the only commit acknowledgement gate. Derived indexes need no fsync.
         self.wal.sync_all()?;
+        // DDL replay can index rows from this new frame, so old cached readers
+        // must not be used until the cache contains the complete commit.
+        let previous = self.committed_cache.take();
         self.replay(pos + 16, len, compact)?;
         self.committed_end = pos + len + 32;
+        if previous.is_some() {
+            self.refresh_cache(previous)?;
+        }
         Ok(())
     }
 
-    pub fn map_committed(&self, max: usize) -> Option<WalMap> {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        {
-            // SAFETY: recovery has finished and future commits only append.
-            // The mapping retains the directory lock until it is unmapped.
-            #[allow(unsafe_code)]
-            unsafe {
-                WalMap::open(&self.wal, &self.path, self.committed_end, max, &self._lock)
-            }
+    fn refresh_cache(&mut self, previous: Option<Rc<CommittedCache>>) -> Result<()> {
+        self.committed_cache = CommittedCache::refresh(
+            previous,
+            &self.wal,
+            self.committed_end,
+            self.committed_limit,
+        )?;
+        if self.committed_cache.is_some() {
+            committed_cache::release_file_pages(&self.wal, self.committed_end);
         }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-        {
-            let _ = max;
-            None
-        }
+        Ok(())
+    }
+
+    fn wal_reader(&self) -> Result<WalRead> {
+        Ok(match &self.committed_cache {
+            Some(cache) => WalRead::Cached(std::io::Cursor::new(CommittedCache::view(cache))),
+            None => WalRead::Direct(File::open(&self.path)?),
+        })
+    }
+
+    pub fn cached_bytes(&self) -> usize {
+        self.committed_cache
+            .as_ref()
+            .map_or(0, |cache| cache.allocated())
+    }
+
+    pub fn cached_committed(&self) -> Option<CommittedView> {
+        self.committed_cache.as_ref().map(CommittedCache::view)
     }
 
     pub fn view(&self, table: &str, transaction: Option<&Changes>) -> Result<View> {
@@ -954,7 +988,7 @@ impl Store {
             base_lookup: committed.map(PositionIndex::reader).transpose()?,
             overlay: overlay.map(DiskIndex::reader).transpose()?,
             extra: overlay.map(DiskIndex::entries).transpose()?,
-            wal: WalRead::Direct(File::open(&self.path)?),
+            wal: self.wal_reader()?,
             blocks: BlockReader::new(self.stage_budget.clone()),
             staged: transaction
                 .map(|tx| tx.stage.reader().map(WalRead::Stage))
@@ -971,7 +1005,7 @@ impl Store {
             .ok_or_else(|| corrupt("vector index missing"))?;
         Ok(VectorView {
             slots: OffsetBatch::new(index.entries()?),
-            log: WalRead::Direct(File::open(&self.path)?),
+            log: self.wal_reader()?,
             dim,
             buffer: Vec::new(),
         })
