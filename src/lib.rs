@@ -5,6 +5,7 @@ mod distance;
 mod engine;
 mod half;
 mod hot;
+mod position_index;
 mod protocol;
 mod query;
 mod read_batch;

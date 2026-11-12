@@ -30,6 +30,7 @@ JSONL
 - `src/protocol.rs` 在恢复后发送 ready，原样回传 JSON id，逐请求刷新。shutdown 放弃显式事务的暂存修改。
 - `src/sql.rs`、`src/types.rs` 和 `src/engine.rs` 分别负责 SQL、类型和事务视图。BIGINT 直接解析为 i64，VARCHAR 按 Unicode 字符数校验，向量的十进制元素直接舍入为有限 float32。
 - `src/storage.rs` 和 `src/disk_index.rs` 把行与目录变更追加到 `commits.mv1`。事务帧包含长度、校验值和完成标记。成功提交响应前同步日志并更新派生索引。每条写语句先在独立磁盘暂存区校验，通过后才并入事务。恢复时重放完整帧、截掉不完整尾部并重建索引。目录独占锁保护恢复和派生文件。
+- 已提交的主键和向量位置表分别尝试密集键页。两者共用暂存预算中的 192 KiB 子预算，超预算或稀疏键分布使用原磁盘位置表。可用 `MINIVECTORDB_POSITION_BYTES` 降低该子预算。
 - `src/query.rs` 和 `src/distance.rs` 在可见记录上先过滤，再比较基于 float32 位模式计算的精确平方距离，按主键打破并列，投影时以 float64 输出欧氏距离。平面向量索引直接定位已提交的二进制向量。过滤、非覆盖列和事务查询走完整行视图。exact 和 ann 请求都执行精确搜索。
 - 查询扫描按行读取。小 TopK 使用有预算的堆，大排序使用磁盘归并。排序只保存键和行位置，投影时才读取命中行并写入磁盘响应缓冲。可用 `MINIVECTORDB_SORT_BYTES` 调小排序预算以复现溢出。
 

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commit_block::{self, Block, RestoredRow};
 use crate::disk_index::{DiskIndex, Entries, Entry};
+use crate::position_index::{PositionBudget, PositionEntries, PositionIndex, PositionReader};
 use crate::read_batch::{OffsetBatch, WalRead};
 use crate::stage::{Budget, Reservation, Stage};
 use crate::types::{DataType, Schema, Value};
@@ -573,13 +574,14 @@ impl Drop for Changes {
 
 pub(crate) struct Store {
     pub catalog: Catalog,
-    indexes: BTreeMap<String, DiskIndex>,
-    vectors: BTreeMap<String, DiskIndex>,
+    indexes: BTreeMap<String, PositionIndex>,
+    vectors: BTreeMap<String, PositionIndex>,
     wal: File,
     path: PathBuf,
     scratch: PathBuf,
     sequence: u64,
     stage_budget: Budget,
+    position_budget: PositionBudget,
     _lock: File,
 }
 impl Store {
@@ -616,6 +618,14 @@ impl Store {
             .open(&path)?;
         #[cfg(unix)]
         File::open(data)?.sync_all()?;
+        let stage_budget = Budget::default();
+        const MAX_POSITION_BYTES: usize = 192 << 10;
+        let position_bytes = std::env::var("MINIVECTORDB_POSITION_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(MAX_POSITION_BYTES)
+            .min(MAX_POSITION_BYTES);
+        let position_budget = PositionBudget::new(stage_budget.clone(), position_bytes);
         let mut store = Self {
             catalog: Catalog::new(),
             indexes: BTreeMap::new(),
@@ -624,7 +634,8 @@ impl Store {
             path,
             scratch,
             sequence: 0,
-            stage_budget: Budget::default(),
+            stage_budget,
+            position_budget,
             _lock: lock,
         };
         store.recover()?;
@@ -646,8 +657,10 @@ impl Store {
             Op::Schema(schema) => {
                 if !self.indexes.contains_key(&schema.name) {
                     let path = self.temp("hash");
-                    self.indexes
-                        .insert(schema.name.clone(), DiskIndex::create(path)?);
+                    self.indexes.insert(
+                        schema.name.clone(),
+                        PositionIndex::create(path, self.position_budget.clone())?,
+                    );
                 }
                 if !schema.indexes.is_empty() && !self.vectors.contains_key(&schema.name) {
                     self.build_vector_index(&schema.name)?;
@@ -683,7 +696,7 @@ impl Store {
     fn build_vector_index(&mut self, table: &str) -> Result<()> {
         // A flat index points directly into committed binary vector payloads.
         // It can be rebuilt from the same row versions as the primary index.
-        let mut index = DiskIndex::create(self.temp("vectors"))?;
+        let mut index = PositionIndex::create(self.temp("vectors"), self.position_budget.clone())?;
         let mut log = WalRead::Direct(File::open(&self.path)?).buffered();
         let mut blocks = BlockReader::new(self.stage_budget.clone());
         let mut slots = OffsetBatch::new(self.indexes[table].entries()?).ordered();
@@ -911,10 +924,10 @@ impl Store {
         let overlay = transaction.and_then(|tx| tx.indexes.get(table));
         Ok(View {
             base: committed
-                .map(DiskIndex::entries)
+                .map(PositionIndex::entries)
                 .transpose()?
                 .map(OffsetBatch::new),
-            base_lookup: committed.map(DiskIndex::reader).transpose()?,
+            base_lookup: committed.map(PositionIndex::reader).transpose()?,
             overlay: overlay.map(DiskIndex::reader).transpose()?,
             extra: overlay.map(DiskIndex::entries).transpose()?,
             wal: WalRead::Direct(File::open(&self.path)?),
@@ -942,7 +955,7 @@ impl Store {
 }
 
 pub(crate) struct VectorView {
-    slots: OffsetBatch<Entries>,
+    slots: OffsetBatch<PositionEntries>,
     log: WalRead,
     dim: usize,
     buffer: Vec<u8>,
@@ -1010,8 +1023,8 @@ impl Iterator for VectorView {
 }
 
 pub(crate) struct View {
-    base: Option<OffsetBatch<Entries>>,
-    base_lookup: Option<DiskIndex>,
+    base: Option<OffsetBatch<PositionEntries>>,
+    base_lookup: Option<PositionReader>,
     overlay: Option<DiskIndex>,
     extra: Option<Entries>,
     wal: WalRead,
