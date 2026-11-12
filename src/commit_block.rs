@@ -802,6 +802,108 @@ impl<'a> Output<'a> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn generated_valid_rows_roundtrip_across_layout_and_size_boundaries() {
+        let mut seed = 0xa20f_9113_713b_55d1_u64;
+        let mut random = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut compressed = 0;
+        for case in 0..384 {
+            let columns = 2 + (random() % 12) as usize;
+            let primary = (random() % columns as u64) as usize;
+            let vector = (primary + 1) % columns;
+            let dimension = [1, 7, 17, 128, 257][case % 5];
+            let count = [2, 3, 17, 100, 255, 256, 257][case % 7];
+            let mut rows = Vec::new();
+            for number in 0..count {
+                let key = (random() as i64).wrapping_add(number);
+                let mut body = vec![1];
+                body.extend_from_slice(&1_u32.to_le_bytes());
+                body.push(b't');
+                body.extend_from_slice(&key.to_le_bytes());
+                body.extend_from_slice(&(columns as u32).to_le_bytes());
+                for column in 0..columns {
+                    if column == primary || column % 3 == 0 && column != vector {
+                        let value = if column == primary {
+                            key
+                        } else {
+                            match case % 4 {
+                                0 => i64::MIN + number,
+                                1 => i64::MAX - number,
+                                2 => number,
+                                _ => random() as i64,
+                            }
+                        };
+                        body.push(0);
+                        body.extend_from_slice(&value.to_le_bytes());
+                    } else if column == vector {
+                        body.push(2);
+                        body.extend_from_slice(&(dimension as u32).to_le_bytes());
+                        for _ in 0..dimension {
+                            // Exclude nonfinite encodings while retaining subnormals and -0.
+                            let bits = (random() as u32) & 0xff7f_ffff;
+                            body.extend_from_slice(&bits.to_le_bytes());
+                        }
+                    } else {
+                        let text = match case % 6 {
+                            0 => String::new(),
+                            1 => format!("共同🙂前缀{}相同后缀", number % 5),
+                            2 => "é".repeat(700),
+                            3 => format!("{}{}", "q".repeat(3 + case), number % 7),
+                            4 => (0..31)
+                                .map(|_| char::from(b'a' + (random() % 26) as u8))
+                                .collect(),
+                            _ => "abcdef".repeat(7),
+                        };
+                        body.push(1);
+                        body.extend_from_slice(&(text.len() as u32).to_le_bytes());
+                        body.extend_from_slice(text.as_bytes());
+                    }
+                }
+                let mut row = (body.len() as u32).to_le_bytes().to_vec();
+                row.extend_from_slice(&body);
+                rows.push(row);
+            }
+            let input = rows.concat();
+            let Some(packed) = pack_payload(&input, |_| Some(primary)).unwrap() else {
+                continue;
+            };
+            compressed += 1;
+            assert!(packed.len() < input.len(), "case {case}");
+            let mut next = 0;
+            let mut at = 0;
+            let mut restored = [0; TARGET_BYTES];
+            while at < packed.len() {
+                let (body, end) = record(&packed, at).unwrap();
+                if body[0] == TAG {
+                    let block = Block::parse(body).unwrap();
+                    for row in 0..block.len() {
+                        let decoded = block.restore(row, &mut restored).unwrap();
+                        assert_eq!(
+                            &restored[..decoded.len],
+                            &rows[next][4..],
+                            "case {case}, row {next}"
+                        );
+                        next += 1;
+                    }
+                } else {
+                    assert_eq!(body, &rows[next][4..], "case {case}, row {next}");
+                    next += 1;
+                }
+                at = end;
+            }
+            assert_eq!(next, rows.len());
+        }
+        assert!(
+            compressed >= 100,
+            "only {compressed} layouts used compression"
+        );
+    }
+
     fn put(table: &str, id: i64, category: &str, text: &str, vector: &[u8]) -> Vec<u8> {
         let mut row = vec![1];
         row.extend_from_slice(&(table.len() as u32).to_le_bytes());
