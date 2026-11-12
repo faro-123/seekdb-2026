@@ -4,9 +4,10 @@ mod linux {
     #![allow(unsafe_code)]
 
     use std::ffi::c_void;
-    use std::fs::File;
+    use std::fs::{self, File, Metadata};
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::MetadataExt;
+    use std::path::Path;
     use std::ptr::{self, NonNull};
     use std::rc::Rc;
     use std::slice;
@@ -24,6 +25,21 @@ mod linux {
             offset: i64,
         ) -> *mut c_void;
         fn munmap(address: *mut c_void, length: usize) -> i32;
+        fn geteuid() -> u32;
+    }
+
+    fn owned(metadata: &Metadata, owner: u32) -> bool {
+        metadata.uid() == owner && metadata.mode() & 0o022 == 0
+    }
+
+    fn same_file(path: &Path, open: &Metadata, owner: u32) -> Option<()> {
+        let entry = fs::symlink_metadata(path).ok()?;
+        (entry.is_file()
+            && owned(&entry, owner)
+            && entry.nlink() == 1
+            && entry.dev() == open.dev()
+            && entry.ino() == open.ino())
+        .then_some(())
     }
 
     pub(crate) struct WalMap {
@@ -38,6 +54,7 @@ mod linux {
         /// prefix must stay immutable for the lifetime of the mapping.
         pub unsafe fn open(
             wal: &File,
+            path: &Path,
             committed: u64,
             max: usize,
             lock: &Rc<File>,
@@ -46,14 +63,20 @@ mod linux {
             if len == 0 || len > isize::MAX as usize || len > max {
                 return None;
             }
+            // SAFETY: geteuid has no arguments and just returns the process UID.
+            let owner = unsafe { geteuid() };
+            let parent = path.parent()?;
+            let dir = fs::symlink_metadata(parent).ok()?;
             let metadata = wal.metadata().ok()?;
-            if !metadata.is_file()
-                || metadata.len() != committed
-                || metadata.mode() & 0o022 != 0
-                || metadata.nlink() != 1
-            {
+            if !dir.is_dir() || !owned(&dir, owner) || metadata.len() != committed {
                 return None;
             }
+            same_file(path, &metadata, owner)?;
+            same_file(
+                &parent.join("minivectordb.lock"),
+                &lock.metadata().ok()?,
+                owner,
+            )?;
             // SAFETY: fd is the owned, recovered regular WAL, offset zero is
             // page-aligned and length is inside its verified committed prefix.
             let ptr = unsafe {

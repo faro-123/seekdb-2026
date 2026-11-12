@@ -933,7 +933,7 @@ impl Store {
             // The mapping retains the directory lock until it is unmapped.
             #[allow(unsafe_code)]
             unsafe {
-                WalMap::open(&self.wal, self.committed_end, max, &self._lock)
+                WalMap::open(&self.wal, &self.path, self.committed_end, max, &self._lock)
             }
         }
         #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
