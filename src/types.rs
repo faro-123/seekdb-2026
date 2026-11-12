@@ -1,7 +1,9 @@
 use std::io::Write;
 
+use serde::de::{Deserializer, SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize, Serializer};
+use serde_json::value::RawValue;
 
 use crate::{Error, Result};
 
@@ -72,43 +74,78 @@ impl Value {
 }
 
 pub(crate) fn vector(s: &str, dim: usize) -> Result<Vec<f32>> {
-    let input: Vec<&serde_json::value::RawValue> = serde_json::from_str(s).map_err(|_| {
+    let invalid_array = |_| {
         Error::new(
             "invalid_vector",
             "vector must be a finite numeric JSON array",
         )
-    })?;
-    if input.len() != dim {
-        return Err(Error::new("dimension_mismatch", "vector dimension differs"));
+    };
+    let mut input = serde_json::Deserializer::from_str(s);
+    let values = input
+        .deserialize_seq(VectorElements(dim))
+        .map_err(invalid_array)?;
+    input.end().map_err(invalid_array)?;
+    values
+}
+
+struct VectorElements(usize);
+
+impl<'de> Visitor<'de> for VectorElements {
+    type Value = Result<Vec<f32>>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a numeric JSON array")
     }
-    input
-        .into_iter()
-        .map(|x| {
-            // Preserve decimal digits until the single rounding to float32.
-            let raw = x.get();
-            if !raw
-                .as_bytes()
-                .first()
-                .is_some_and(|b| b.is_ascii_digit() || *b == b'-')
+
+    fn visit_seq<A: SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
+        let mut count = 0;
+        let mut values = Ok(Vec::with_capacity(self.0.min(256)));
+        while let Some(raw) = seq.next_element::<&RawValue>()? {
+            if count < self.0
+                && let Ok(vector) = &mut values
             {
-                return Err(Error::new(
-                    "invalid_vector",
-                    "vector elements must be JSON numbers",
-                ));
+                match vector_number(raw.get()) {
+                    Ok(number) => vector.push(number),
+                    Err(error) => values = Err(error),
+                }
             }
-            let f = raw
-                .parse::<f32>()
-                .map_err(|_| Error::new("invalid_vector", "invalid float32 number"))?;
-            if f.is_finite() {
-                Ok(f)
-            } else {
-                Err(Error::new(
-                    "invalid_vector",
-                    "value cannot be stored as finite float32",
-                ))
-            }
+            count += 1;
+        }
+        // Complete syntax validation and count before exposing an element error.
+        Ok(if count == self.0 {
+            values
+        } else {
+            Err(Error::new("dimension_mismatch", "vector dimension differs"))
         })
-        .collect()
+    }
+}
+
+fn vector_number(raw: &str) -> Result<f32> {
+    if !raw
+        .as_bytes()
+        .first()
+        .is_some_and(|b| b.is_ascii_digit() || *b == b'-')
+    {
+        return Err(Error::new(
+            "invalid_vector",
+            "vector elements must be JSON numbers",
+        ));
+    }
+    // Parse the original decimal directly so there is only one rounding.
+    let number = raw
+        .parse::<f32>()
+        .map_err(|_| Error::new("invalid_vector", "invalid float32 number"))?;
+    if number.is_finite() {
+        Ok(number)
+    } else {
+        Err(Error::new(
+            "invalid_vector",
+            "value cannot be stored as finite float32",
+        ))
+    }
 }
 
 pub(crate) fn coerce(lit: &Literal, kind: &DataType) -> Result<Value> {
@@ -131,5 +168,62 @@ pub(crate) fn coerce(lit: &Literal, kind: &DataType) -> Result<Value> {
             "type_error",
             "literal type differs from column type",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::vector;
+
+    #[test]
+    fn vector_preserves_error_order_and_float32_rounding() {
+        for (input, dim, code, message) in [
+            (
+                "[false,1]",
+                1,
+                "dimension_mismatch",
+                "vector dimension differs",
+            ),
+            (
+                "[false,1,]",
+                1,
+                "invalid_vector",
+                "vector must be a finite numeric JSON array",
+            ),
+            (
+                "[false] 0",
+                1,
+                "invalid_vector",
+                "vector must be a finite numeric JSON array",
+            ),
+            (
+                "[false]",
+                1,
+                "invalid_vector",
+                "vector elements must be JSON numbers",
+            ),
+            (
+                "[3.5e38]",
+                1,
+                "invalid_vector",
+                "value cannot be stored as finite float32",
+            ),
+        ] {
+            let error = vector(input, dim).unwrap_err();
+            assert_eq!(
+                (error.code, error.message.as_str()),
+                (code, message),
+                "{input}"
+            );
+        }
+        let numbers = vector(
+            "[-0,1.401298464324817e-45,1.000000059604644775390625,1.000000059604644775390626]",
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            numbers.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+            [0x8000_0000, 1, 0x3f80_0000, 0x3f80_0001]
+        );
     }
 }
