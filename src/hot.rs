@@ -905,6 +905,7 @@ impl HotCache {
         self.invalidate();
         union[..count].sort_unstable();
         if self.expanded
+            && store.committed_pages_synced()
             && store.catalog.len() == 1
             && schema.columns.len() <= MAX_FIELDS + 2
             && let Some((kernel, query)) = try_mapped
@@ -1097,6 +1098,17 @@ mod tests {
         }
         drop(cache);
         drop(changes);
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        assert!(!store.committed_pages_synced());
+        let mut cache = HotCache::with_budget(MAX_BYTES);
+        cache.expanded = true;
+        let table = cache
+            .get(&mut store, &schema, 1, &[], Some(&[0.0; 128]))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(table.vectors, SnapshotVectors::Packed(_)));
+        drop(cache);
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
     }

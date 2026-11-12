@@ -647,6 +647,7 @@ pub(crate) struct Store {
     vectors: BTreeMap<String, PositionIndex>,
     wal: File,
     committed_end: u64,
+    synced_end: u64,
     committed_cache: Option<Rc<CommittedCache>>,
     cache_lease: Weak<CommittedCache>,
     committed_limit: usize,
@@ -710,6 +711,7 @@ impl Store {
             vectors: BTreeMap::new(),
             wal,
             committed_end: 0,
+            synced_end: 0,
             committed_cache: None,
             cache_lease: Weak::new(),
             committed_limit: std::env::var("MINIVECTORDB_COMMITTED_BYTES")
@@ -933,6 +935,7 @@ impl Store {
         if pos != size {
             self.wal.set_len(pos)?;
             self.wal.sync_all()?;
+            self.synced_end = pos;
         }
         self.wal.seek(SeekFrom::End(0))?;
         self.committed_end = pos;
@@ -1009,6 +1012,7 @@ impl Store {
         self.wal.sync_all()?;
         self.replay(pos + 16, len, format.compact())?;
         self.committed_end = end;
+        self.synced_end = end;
         Ok(())
     }
 
@@ -1038,6 +1042,12 @@ impl Store {
         self.committed_end
     }
 
+    pub fn committed_pages_synced(&self) -> bool {
+        // A complete frame recovered after an unacknowledged commit might
+        // still be dirty. Do not assume it was synced by the prior process.
+        self.synced_end == self.committed_end
+    }
+
     /// Convert an index location to the earliest physical byte a row needs.
     pub fn committed_row_start(offset: u64) -> u64 {
         BlockPosition::unpack(offset).map_or(offset, |block| block.start)
@@ -1046,7 +1056,11 @@ impl Store {
     /// Hot construction only visits committed rows, after the WAL has synced.
     /// Advice cannot extend into a partial or uncommitted tail.
     pub fn release_consumed_pages(&self, start: u64, end: u64) {
-        committed_cache::release_file_range(&self.wal, start, end.min(self.committed_end));
+        committed_cache::release_file_range(
+            &self.wal,
+            start,
+            end.min(self.committed_end).min(self.synced_end),
+        );
     }
 
     fn wal_reader(&self) -> Result<WalRead> {
