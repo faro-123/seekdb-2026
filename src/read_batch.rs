@@ -147,12 +147,18 @@ impl<R: Read + Seek> Seek for BufferedFile<R> {
 
 pub(crate) enum WalRead {
     Direct(File),
-    Cached(Cursor<CommittedView>),
+    Cached(CachedFile),
     Buffered(BufferedFile<File>),
     Stage(StageRead),
 }
 
 impl WalRead {
+    pub fn cached(file: File, view: CommittedView) -> Self {
+        Self::Cached(CachedFile {
+            prefix: Cursor::new(view),
+            tail: file,
+        })
+    }
     pub fn prefetch(&mut self, enabled: bool) {
         if let Self::Buffered(reader) = self {
             reader.prefetch = enabled;
@@ -163,6 +169,36 @@ impl WalRead {
         match self {
             Self::Direct(file) => Self::Buffered(BufferedFile::new(file)),
             buffered => buffered,
+        }
+    }
+}
+
+pub(crate) struct CachedFile {
+    prefix: Cursor<CommittedView>,
+    tail: File,
+}
+
+impl Read for CachedFile {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        let position = self.prefix.position();
+        if position < self.prefix.get_ref().bytes().len() as u64 {
+            return self.prefix.read(out);
+        }
+        self.tail.seek(SeekFrom::Start(position))?;
+        let count = self.tail.read(out)?;
+        self.prefix.set_position(position + count as u64);
+        Ok(count)
+    }
+}
+
+impl Seek for CachedFile {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        if let SeekFrom::End(_) = from {
+            let position = self.tail.seek(from)?;
+            self.prefix.set_position(position);
+            Ok(position)
+        } else {
+            self.prefix.seek(from)
         }
     }
 }
@@ -195,6 +231,46 @@ mod tests {
     use std::cell::Cell;
     use std::io::Cursor;
     use std::rc::Rc;
+
+    #[test]
+    fn cached_reader_combines_validated_prefix_and_new_file_tail() {
+        use crate::committed_cache::{CommittedCache, MAX_BYTES};
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "mv-cached-read-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"prefix").unwrap();
+        let cache = CommittedCache::refresh(None, &file, 6, MAX_BYTES)
+            .unwrap()
+            .unwrap();
+        file.seek(SeekFrom::End(0)).unwrap();
+        file.write_all(b"-tail").unwrap();
+        let mut reader = WalRead::cached(File::open(&path).unwrap(), CommittedCache::view(&cache));
+        let mut bytes = [0; 8];
+        reader.seek(SeekFrom::Start(3)).unwrap();
+        reader.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"fix-tail");
+        reader.seek(SeekFrom::End(-4)).unwrap();
+        assert_eq!(reader.read(&mut bytes).unwrap(), 4);
+        assert_eq!(&bytes[..4], b"tail");
+        reader.seek(SeekFrom::Start(0)).unwrap();
+        let mut prefix = [0; 6];
+        reader.read_exact(&mut prefix).unwrap();
+        assert_eq!(&prefix, b"prefix");
+        drop((reader, file));
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn reads_cross_buffer_boundaries_and_large_reads_after_backward_seeks() {

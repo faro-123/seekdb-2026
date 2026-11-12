@@ -646,7 +646,7 @@ impl Store {
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(committed_cache::MAX_BYTES)
                 .min(committed_cache::MAX_BYTES)
-                .min(hot_bytes.saturating_sub(1 << 20)),
+                .min(committed_cache::limit_for_hot_budget(hot_bytes)),
             path,
             scratch,
             sequence: 0,
@@ -936,10 +936,10 @@ impl Store {
         self.wal.write_all(&hash.to_le_bytes())?;
         // This is the only commit acknowledgement gate. Derived indexes need no fsync.
         self.wal.sync_all()?;
-        // DDL replay can index rows from this new frame, so old cached readers
-        // must not be used until the cache contains the complete commit.
-        let previous = self.committed_cache.take();
+        // Readers use the cached prefix and fall through to the new WAL tail.
+        // DDL replay can therefore index both prior rows and rows in this frame.
         self.replay(pos + 16, len, compact)?;
+        let previous = self.committed_cache.take();
         self.committed_end = pos + len + 32;
         if previous.is_some() {
             self.refresh_cache(previous)?;
@@ -962,7 +962,7 @@ impl Store {
 
     fn wal_reader(&self) -> Result<WalRead> {
         Ok(match &self.committed_cache {
-            Some(cache) => WalRead::Cached(std::io::Cursor::new(CommittedCache::view(cache))),
+            Some(cache) => WalRead::cached(File::open(&self.path)?, CommittedCache::view(cache)),
             None => WalRead::Direct(File::open(&self.path)?),
         })
     }

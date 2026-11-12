@@ -9,6 +9,17 @@ pub(crate) const MAX_BYTES: usize = 4 << 20;
 const INITIAL_BYTES: usize = 64 << 10;
 const OWNER_BYTES: usize = 128;
 
+/// Leave room for the old and new buffers during growth, as well as query work.
+pub(crate) fn limit_for_hot_budget(hot: usize) -> usize {
+    let room = hot.saturating_sub(1 << 20).saturating_sub(2 * OWNER_BYTES);
+    let maximum = room / 3 * 2;
+    if maximum == 0 {
+        return 0;
+    }
+    let power = usize::BITS - 1 - maximum.leading_zeros();
+    (1_usize << power).min(MAX_BYTES)
+}
+
 pub(crate) struct CommittedCache {
     bytes: Vec<u8>,
 }
@@ -154,5 +165,15 @@ mod tests {
         );
         drop((old, file));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn cache_growth_stays_inside_reduced_hot_budgets() {
+        for hot in [0, 1 << 20, 2 << 20, 3 << 20, 6 << 20, 8 << 20] {
+            let cap = limit_for_hot_budget(hot);
+            if cap != 0 {
+                assert!(cap + cap / 2 + 2 * OWNER_BYTES + (1 << 20) <= hot);
+            }
+        }
     }
 }
