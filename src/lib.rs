@@ -14,6 +14,7 @@ mod query;
 mod read_batch;
 mod sql;
 mod stage;
+mod stage_index;
 mod storage;
 mod types;
 mod vector_codec;

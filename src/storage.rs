@@ -7,10 +7,11 @@ use std::rc::{Rc, Weak};
 
 use crate::commit_block::{self, Block, RestoredRow};
 use crate::committed_cache::{self, CommittedCache, CommittedView};
-use crate::disk_index::{DiskIndex, Entries, Entry};
+use crate::disk_index::Entry;
 use crate::position_index::{PositionBudget, PositionEntries, PositionIndex, PositionReader};
 use crate::read_batch::{OffsetBatch, WalRead};
 use crate::stage::{Budget, Reservation, Stage};
+use crate::stage_index::{StageEntries, StageIndex, StageLookup};
 use crate::types::{DataType, Schema, Value};
 use crate::vector_codec::{self, HEADER_BYTES, Header as PackedHeader};
 use crate::{Error, Result};
@@ -572,7 +573,7 @@ fn decode_matching_row(data: &[u8], equalities: &[(usize, &Value)]) -> Result<Op
 pub(crate) struct Changes {
     pub catalog: Catalog,
     stage: Stage,
-    indexes: BTreeMap<String, DiskIndex>,
+    indexes: BTreeMap<String, StageIndex>,
     root: PathBuf,
 }
 impl Changes {
@@ -590,17 +591,20 @@ impl Changes {
                 self.catalog.insert(schema.name.clone(), schema.clone());
             }
             Op::Put { table, key, .. } | Op::Delete { table, key } => {
-                if !self.indexes.contains_key(table) {
-                    let path = self
-                        .root
-                        .with_extension(format!("{}.hash", self.indexes.len()));
-                    self.indexes.insert(table.clone(), DiskIndex::create(path)?);
-                }
-                self.indexes.get_mut(table).unwrap().put(Entry {
+                let entry = Entry {
                     key: *key,
                     offset,
                     deleted: matches!(op, Op::Delete { .. }),
-                })?;
+                };
+                if let Some(index) = self.indexes.get_mut(table) {
+                    index.put(entry)?;
+                } else {
+                    let path = self
+                        .root
+                        .with_extension(format!("{}.hash", self.indexes.len()));
+                    let index = StageIndex::new(path, entry, self.indexes.is_empty())?;
+                    self.indexes.insert(table.clone(), index);
+                }
             }
         }
         Ok(())
@@ -636,7 +640,9 @@ impl Changes {
 impl Drop for Changes {
     fn drop(&mut self) {
         for index in self.indexes.values() {
-            let _ = fs::remove_file(index.path());
+            if let Some(path) = index.path() {
+                let _ = fs::remove_file(path);
+            }
         }
     }
 }
@@ -1089,8 +1095,8 @@ impl Store {
                 .transpose()?
                 .map(OffsetBatch::new),
             base_lookup: committed.map(PositionIndex::reader).transpose()?,
-            overlay: overlay.map(DiskIndex::reader).transpose()?,
-            extra: overlay.map(DiskIndex::entries).transpose()?,
+            overlay: overlay.map(StageIndex::reader).transpose()?,
+            extra: overlay.map(StageIndex::entries).transpose()?,
             wal: self.wal_reader()?,
             blocks: BlockReader::new(self.stage_budget.clone()),
             staged: transaction
@@ -1186,8 +1192,8 @@ impl Iterator for VectorView {
 pub(crate) struct View {
     base: Option<OffsetBatch<PositionEntries>>,
     base_lookup: Option<PositionReader>,
-    overlay: Option<DiskIndex>,
-    extra: Option<Entries>,
+    overlay: Option<StageLookup>,
+    extra: Option<StageEntries>,
     wal: WalRead,
     blocks: BlockReader,
     staged: Option<WalRead>,
@@ -1433,6 +1439,70 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consecutive_staged_rows_stay_inline_then_keep_offsets_on_fallback() {
+        let path = std::env::temp_dir().join(format!(
+            "mv-stage-run-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut store = Store::open(&path).unwrap();
+        let mut changes = store.changes(store.catalog.clone()).unwrap();
+        let put = |key, text: &str| Op::Put {
+            table: "t".into(),
+            key,
+            row: vec![Value::Int(key), Value::Text(text.into())],
+        };
+        for key in -3..=3 {
+            changes.push(put(key, "aa")).unwrap();
+        }
+        let has_slots = || {
+            std::fs::read_dir(path.join("scratch"))
+                .unwrap()
+                .any(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".hash")
+                })
+        };
+        assert!(
+            !has_slots(),
+            "consecutive rows should not create temporary slots"
+        );
+        let first = changes.get("t", -3).unwrap().unwrap();
+        let last = changes.get("t", 3).unwrap().unwrap();
+        let view = store.view("t", Some(&changes)).unwrap();
+        assert_eq!(view.count(), 7);
+        changes.push(put(1, "changed")).unwrap();
+        assert!(
+            has_slots(),
+            "upsert must materialize all previous positions"
+        );
+        assert_eq!(changes.get("t", -3).unwrap().unwrap().offset, first.offset);
+        assert_eq!(changes.get("t", 3).unwrap().unwrap().offset, last.offset);
+        changes
+            .push(Op::Delete {
+                table: "t".into(),
+                key: 2,
+            })
+            .unwrap();
+        let mut rows: Vec<_> = store
+            .view("t", Some(&changes))
+            .unwrap()
+            .map(|row| row.unwrap().key)
+            .collect();
+        rows.sort_unstable();
+        assert_eq!(rows, [-3, -2, -1, 0, 1, 3]);
+        drop(changes);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     #[test]
     fn aligned_commit_restarts_with_old_frames_and_discards_a_torn_footer() {
