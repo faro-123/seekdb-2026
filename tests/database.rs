@@ -595,3 +595,29 @@ fn compact_commits_recover_multiple_blocks_and_mix_with_legacy_rows() {
         ])
     );
 }
+
+#[test]
+fn spill_from_failed_statement_keeps_prior_transaction_and_recovery() {
+    let data = Data::new();
+    let wide = "a".repeat(1 << 20);
+    let commands = [
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, body VARCHAR(1048576));".to_owned(),
+        "INSERT INTO t VALUES (1,'old');".to_owned(),
+        "BEGIN;".to_owned(),
+        "UPDATE t SET body='noop' WHERE id=9;".to_owned(),
+        "INSERT INTO t VALUES (2,'discard'),(1,'duplicate');".to_owned(),
+        "INSERT INTO t VALUES (2,'retained');".to_owned(),
+        format!("INSERT INTO t VALUES (3,'{wide}'),(1,'duplicate');"),
+        "SELECT id,body FROM t ORDER BY id;".to_owned(),
+        "COMMIT;".to_owned(),
+    ];
+    let replies = session(&data, &commands);
+    for i in [4, 6] {
+        assert_eq!(replies[i]["error"]["code"], "duplicate_key");
+    }
+    let expected = json!([[1, "old"], [2, "retained"]]);
+    assert_eq!(replies[7]["rows"], expected);
+    assert_eq!(replies[8]["ok"], true);
+    let reopened = session(&data, &["SELECT id,body FROM t ORDER BY id;".into()]);
+    assert_eq!(reopened[0]["rows"], expected);
+}

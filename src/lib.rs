@@ -9,6 +9,7 @@ mod protocol;
 mod query;
 mod read_batch;
 mod sql;
+mod stage;
 mod storage;
 mod types;
 mod vector_codec;

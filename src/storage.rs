@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::commit_block::{self, Block, RestoredRow};
 use crate::disk_index::{DiskIndex, Entries, Entry};
 use crate::read_batch::{OffsetBatch, WalRead};
+use crate::stage::{Budget, Reservation, Stage};
 use crate::types::{DataType, Schema, Value};
 use crate::vector_codec::{self, HEADER_BYTES, Header as PackedHeader};
 use crate::{Error, Result};
@@ -18,6 +19,9 @@ const HEADER: &[u8; 8] = b"MVTX0001";
 const COMMIT: &[u8; 8] = b"COMMIT01";
 const BLOCK_HEADER: &[u8; 8] = b"MVTX0002";
 const BLOCK_COMMIT: &[u8; 8] = b"COMMIT02";
+// Excludes the input, which is either an already charged stage or a separately
+// reserved disk read. Includes output, descriptors, dictionaries and stack scratch.
+const BLOCK_ENCODE_WORKSPACE: usize = 576 << 10;
 const FNV: u64 = 0xcbf2_9ce4_8422_2325;
 fn checksum(mut hash: u64, buf: &[u8]) -> u64 {
     for b in buf {
@@ -42,19 +46,36 @@ pub(crate) enum Op {
         key: i64,
     },
 }
-fn number(out: &mut Vec<u8>, n: usize) -> Result<()> {
-    out.extend_from_slice(
-        &u32::try_from(n)
-            .map_err(|_| Error::new("resource_limit", "record exceeds format limit"))?
-            .to_le_bytes(),
-    );
+fn record_limit() -> Error {
+    Error::new("resource_limit", "record exceeds format limit")
+}
+
+fn number(out: &mut impl Write, n: usize) -> Result<()> {
+    out.write_all(&u32::try_from(n).map_err(|_| record_limit())?.to_le_bytes())?;
     Ok(())
 }
-fn string(out: &mut Vec<u8>, s: &str) -> Result<()> {
+
+fn string(out: &mut impl Write, s: &str) -> Result<()> {
     number(out, s.len())?;
-    out.extend_from_slice(s.as_bytes());
+    out.write_all(s.as_bytes())?;
     Ok(())
 }
+
+struct CountBytes(usize);
+
+impl Write for CountBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.checked_add(bytes.len()).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "schema size overflow")
+        })?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn u32read(r: &mut impl Read) -> Result<u32> {
     let mut b = [0; 4];
     r.read_exact(&mut b)?;
@@ -82,54 +103,119 @@ fn sized_bytes<'a>(r: &mut &'a [u8], item_bytes: usize) -> Result<&'a [u8]> {
 fn decode_text(bytes: &[u8]) -> Result<String> {
     String::from_utf8(bytes.to_vec()).map_err(|_| corrupt("invalid UTF-8"))
 }
-fn encode(op: &Op) -> Result<Vec<u8>> {
-    let mut b = Vec::new();
-    match op {
-        Op::Schema(schema) => {
-            b.push(0);
-            b.extend(serde_json::to_vec(schema)?);
-        }
-        Op::Put { table, key, row } => {
-            b.push(1);
-            string(&mut b, table)?;
-            b.extend_from_slice(&key.to_le_bytes());
-            number(&mut b, row.len())?;
-            for value in row {
-                match value {
-                    Value::Int(x) => {
-                        b.push(0);
-                        b.extend_from_slice(&x.to_le_bytes());
-                    }
-                    Value::Text(x) => {
-                        b.push(1);
-                        string(&mut b, x)?;
-                    }
-                    Value::Vector(x) => {
-                        let tag = b.len();
-                        b.push(2);
-                        number(&mut b, x.len())?;
-                        if vector_codec::try_pack(x, &mut b) {
-                            b[tag] = 3;
-                        } else {
-                            for f in x {
-                                b.extend_from_slice(&f.to_le_bytes());
+struct RecordLayout {
+    body_size: u32,
+    packed: Option<PackedHeader>,
+}
+
+impl RecordLayout {
+    fn new(op: &Op) -> Result<Self> {
+        let mut packed = None;
+        let body_size = match op {
+            Op::Schema(schema) => {
+                let mut bytes = CountBytes(1);
+                serde_json::to_writer(&mut bytes, schema)?;
+                bytes.0
+            }
+            Op::Put { table, row, .. } => {
+                let mut bytes = 17 + table.len();
+                let mut seen_vector = false;
+                for value in row {
+                    let field = match value {
+                        Value::Int(_) => 9,
+                        Value::Text(text) => 5 + text.len(),
+                        Value::Vector(vector) => {
+                            if seen_vector {
+                                return Err(corrupt("row has multiple vector fields"));
+                            }
+                            seen_vector = true;
+                            packed = vector_codec::packed_header(vector);
+                            5 + if let Some(header) = packed {
+                                HEADER_BYTES + header.payload_len(vector.len())?
+                            } else {
+                                vector.len() * 4
+                            }
+                        }
+                    };
+                    bytes = bytes.checked_add(field).ok_or_else(record_limit)?;
+                }
+                bytes
+            }
+            Op::Delete { table, .. } => 13 + table.len(),
+        };
+        let body_size = u32::try_from(body_size).map_err(|_| record_limit())?;
+        Ok(Self { body_size, packed })
+    }
+
+    fn size(&self) -> Result<usize> {
+        (self.body_size as usize)
+            .checked_add(4)
+            .ok_or_else(record_limit)
+    }
+
+    fn write(&self, op: &Op, out: &mut impl Write) -> Result<()> {
+        out.write_all(&self.body_size.to_le_bytes())?;
+        match op {
+            Op::Schema(schema) => {
+                out.write_all(&[0])?;
+                serde_json::to_writer(out, schema).map_err(std::io::Error::from)?;
+            }
+            Op::Put { table, key, row } => {
+                out.write_all(&[1])?;
+                string(out, table)?;
+                out.write_all(&key.to_le_bytes())?;
+                number(out, row.len())?;
+                for value in row {
+                    match value {
+                        Value::Int(x) => {
+                            out.write_all(&[0])?;
+                            out.write_all(&x.to_le_bytes())?;
+                        }
+                        Value::Text(x) => {
+                            out.write_all(&[1])?;
+                            string(out, x)?;
+                        }
+                        Value::Vector(x) => {
+                            out.write_all(&[if self.packed.is_some() { 3 } else { 2 }])?;
+                            number(out, x.len())?;
+                            if let Some(header) = self.packed {
+                                vector_codec::write_packed(header, x, out)?;
+                            } else {
+                                write_raw_vector(x, out)?;
                             }
                         }
                     }
                 }
             }
+            Op::Delete { table, key } => {
+                out.write_all(&[2])?;
+                string(out, table)?;
+                out.write_all(&key.to_le_bytes())?;
+            }
         }
-        Op::Delete { table, key } => {
-            b.push(2);
-            string(&mut b, table)?;
-            b.extend_from_slice(&key.to_le_bytes());
-        }
+        Ok(())
     }
-    let mut out = Vec::with_capacity(b.len() + 4);
-    number(&mut out, b.len())?;
-    out.extend(b);
+}
+
+fn write_raw_vector(vector: &[f32], out: &mut impl Write) -> std::io::Result<()> {
+    let mut buffer = [0; 1024];
+    for values in vector.chunks(buffer.len() / 4) {
+        for (slot, value) in buffer.as_chunks_mut::<4>().0.iter_mut().zip(values) {
+            *slot = value.to_le_bytes();
+        }
+        out.write_all(&buffer[..values.len() * 4])?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn encode(op: &Op) -> Result<Vec<u8>> {
+    let layout = RecordLayout::new(op)?;
+    let mut out = Vec::with_capacity(layout.size()?);
+    layout.write(op, &mut out)?;
     Ok(out)
 }
+
 struct Record {
     op: Op,
     vector_at: Option<u64>,
@@ -182,14 +268,33 @@ impl BlockPosition {
     }
 }
 
-#[derive(Default)]
 struct BlockReader {
     start: Option<u64>,
     body: Vec<u8>,
     expanded: Vec<u8>,
+    budget: Budget,
+    body_reservation: Option<Reservation>,
+    expanded_reservation: Option<Reservation>,
 }
 
 impl BlockReader {
+    fn new(budget: Budget) -> Self {
+        Self {
+            start: None,
+            body: Vec::new(),
+            expanded: Vec::new(),
+            budget,
+            body_reservation: None,
+            expanded_reservation: None,
+        }
+    }
+
+    fn reserve(&self) -> Result<Reservation> {
+        self.budget
+            .reserve(commit_block::TARGET_BYTES)
+            .ok_or_else(|| corrupt("compact block read workspace exhausted"))
+    }
+
     fn load(&mut self, file: &mut (impl Read + Seek), start: u64) -> Result<()> {
         if self.start != Some(start) {
             self.start = None;
@@ -198,7 +303,8 @@ impl BlockReader {
             if size == 0 || size > commit_block::TARGET_BYTES {
                 return Err(corrupt("compact block size exceeds read limit"));
             }
-            if self.body.capacity() == 0 {
+            if self.body_reservation.is_none() {
+                self.body_reservation = Some(self.reserve()?);
                 self.body = Vec::with_capacity(commit_block::TARGET_BYTES);
             }
             self.body.resize(size, 0);
@@ -224,7 +330,10 @@ impl BlockReader {
         location: BlockPosition,
     ) -> Result<(&[u8], RestoredRow)> {
         self.load(file, location.start)?;
-        self.expanded.resize(commit_block::TARGET_BYTES, 0);
+        if self.expanded_reservation.is_none() {
+            self.expanded_reservation = Some(self.reserve()?);
+            self.expanded.resize(commit_block::TARGET_BYTES, 0);
+        }
         let row = Block::parse(&self.body)?.restore(location.row, &mut self.expanded)?;
         Ok((&self.expanded[..row.len], row))
     }
@@ -392,26 +501,18 @@ fn decode_matching_row(data: &[u8], equalities: &[(usize, &Value)]) -> Result<Op
 
 pub(crate) struct Changes {
     pub catalog: Catalog,
-    path: PathBuf,
-    file: File,
+    stage: Stage,
     indexes: BTreeMap<String, DiskIndex>,
     root: PathBuf,
 }
 impl Changes {
-    fn new(root: PathBuf, catalog: Catalog) -> Result<Self> {
-        let path = root.with_extension("stage");
-        let file = OpenOptions::new()
-            .create_new(true)
-            .read(true)
-            .write(true)
-            .open(&path)?;
-        Ok(Self {
+    fn new(root: PathBuf, catalog: Catalog, budget: Budget) -> Self {
+        Self {
             catalog,
-            path,
-            file,
+            stage: Stage::new(root.with_extension("stage"), budget),
             indexes: BTreeMap::new(),
             root,
-        })
+        }
     }
     fn apply(&mut self, op: &Op, offset: u64) -> Result<()> {
         match op {
@@ -435,8 +536,10 @@ impl Changes {
         Ok(())
     }
     pub fn push(&mut self, op: Op) -> Result<()> {
-        let offset = self.file.stream_position()?;
-        self.file.write_all(&encode(&op)?)?;
+        let layout = RecordLayout::new(&op)?;
+        let offset = self
+            .stage
+            .append(layout.size()?, |out| layout.write(&op, out))?;
         self.apply(&op, offset)
     }
     pub fn get(&mut self, table: &str, key: i64) -> Result<Option<Entry>> {
@@ -444,8 +547,16 @@ impl Changes {
             .get_mut(table)
             .map_or(Ok(None), |index| index.get(key))
     }
-    pub fn merge(&mut self, other: &Changes) -> Result<()> {
-        let mut reader = BufReader::new(File::open(&other.path)?);
+    pub fn merge(&mut self, other: Changes) -> Result<()> {
+        if other.stage.len() == 0 {
+            return Ok(());
+        }
+        if self.stage.len() == 0 {
+            // The file or memory payload, catalog and index offsets move together.
+            *self = other;
+            return Ok(());
+        }
+        let mut reader = BufReader::new(other.stage.reader()?);
         while let Some(op) = read_op(&mut reader)? {
             self.push(op)?;
         }
@@ -454,7 +565,6 @@ impl Changes {
 }
 impl Drop for Changes {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
         for index in self.indexes.values() {
             let _ = fs::remove_file(index.path());
         }
@@ -469,6 +579,7 @@ pub(crate) struct Store {
     path: PathBuf,
     scratch: PathBuf,
     sequence: u64,
+    stage_budget: Budget,
     _lock: File,
 }
 impl Store {
@@ -513,6 +624,7 @@ impl Store {
             path,
             scratch,
             sequence: 0,
+            stage_budget: Budget::default(),
             _lock: lock,
         };
         store.recover()?;
@@ -524,7 +636,7 @@ impl Store {
     }
     pub fn changes(&mut self, catalog: Catalog) -> Result<Changes> {
         let root = self.temp("base");
-        Changes::new(root, catalog)
+        Ok(Changes::new(root, catalog, self.stage_budget.clone()))
     }
     pub fn get(&mut self, table: &str, key: i64) -> Result<Option<Entry>> {
         self.indexes.get_mut(table).map_or(Ok(None), |x| x.get(key))
@@ -573,7 +685,7 @@ impl Store {
         // It can be rebuilt from the same row versions as the primary index.
         let mut index = DiskIndex::create(self.temp("vectors"))?;
         let mut log = WalRead::Direct(File::open(&self.path)?).buffered();
-        let mut blocks = BlockReader::default();
+        let mut blocks = BlockReader::new(self.stage_budget.clone());
         let mut slots = OffsetBatch::new(self.indexes[table].entries()?).ordered();
         while let Some(slot) = slots.next() {
             let slot = slot?;
@@ -604,7 +716,20 @@ impl Store {
         file.seek(SeekFrom::Start(start))?;
         let end = start + len;
         let mut offset = start;
-        let mut body = Vec::new();
+        let _compact_reservation = if compact {
+            Some(
+                self.stage_budget
+                    .reserve(commit_block::MAX_INPUT_BYTES + commit_block::TARGET_BYTES)
+                    .ok_or_else(|| corrupt("compact replay workspace exhausted"))?,
+            )
+        } else {
+            None
+        };
+        let mut body = if compact {
+            Vec::with_capacity(commit_block::MAX_INPUT_BYTES)
+        } else {
+            Vec::new()
+        };
         let mut expanded = Vec::new();
         while offset < end {
             if end - offset < 4 {
@@ -715,45 +840,63 @@ impl Store {
         Ok(())
     }
     pub fn commit(&mut self, changes: &Changes) -> Result<()> {
-        let mut len = changes.file.metadata()?.len();
+        let mut len = changes.stage.len();
         if len == 0 {
             return Ok(());
         }
         let pos = self.wal.seek(SeekFrom::End(0))?;
-        let mut reader = File::open(&changes.path)?;
-        // Small transactions can be examined in one bounded window. Large
-        // transactions and wide rows retain the streaming legacy writer.
-        let mut compact = false;
-        let hash = if len <= commit_block::MAX_INPUT_BYTES as u64
+        let staged = changes.stage.bytes();
+        let reservation = if len <= commit_block::MAX_INPUT_BYTES as u64
             && pos <= BlockPosition::MAX_START - (len + 32)
         {
-            let mut input = vec![0; len as usize];
-            reader.read_exact(&mut input)?;
-            let payload = commit_block::pack_payload(&input, |table| {
+            let input_bytes = if staged.is_some() { 0 } else { len as usize };
+            self.stage_budget
+                .reserve(BLOCK_ENCODE_WORKSPACE + input_bytes)
+        } else {
+            None
+        };
+        let mut compact = false;
+        let hash = if let Some(_reservation) = reservation {
+            let disk_input;
+            let input = if let Some(bytes) = staged {
+                bytes
+            } else {
+                let mut bytes = vec![0; len as usize];
+                changes.stage.reader()?.read_exact(&mut bytes)?;
+                disk_input = bytes;
+                &disk_input
+            };
+            let payload = commit_block::pack_payload(input, |table| {
                 changes.catalog.get(table).map(|schema| schema.primary)
             })?;
             compact = payload.is_some();
-            let payload = payload.unwrap_or(input);
+            let payload = payload.as_deref().unwrap_or(input);
             len = payload.len() as u64;
             self.wal
                 .write_all(if compact { BLOCK_HEADER } else { HEADER })?;
             self.wal.write_all(&len.to_le_bytes())?;
-            self.wal.write_all(&payload)?;
-            checksum(FNV, &payload)
+            self.wal.write_all(payload)?;
+            checksum(FNV, payload)
         } else {
             self.wal.write_all(HEADER)?;
             self.wal.write_all(&len.to_le_bytes())?;
-            let mut buffer = [0; 65536];
-            let mut hash = FNV;
-            let mut remaining = len;
-            while remaining > 0 {
-                let count = remaining.min(buffer.len() as u64) as usize;
-                reader.read_exact(&mut buffer[..count])?;
-                hash = checksum(hash, &buffer[..count]);
-                self.wal.write_all(&buffer[..count])?;
-                remaining -= count as u64;
+            if let Some(bytes) = staged {
+                self.wal.write_all(bytes)?;
+                checksum(FNV, bytes)
+            } else {
+                let mut reader = changes.stage.reader()?;
+                let mut buffer = [0; 65536];
+                let mut hash = FNV;
+                let mut remaining = len;
+                while remaining > 0 {
+                    let count = remaining.min(buffer.len() as u64) as usize;
+                    reader.read_exact(&mut buffer[..count])?;
+                    hash = checksum(hash, &buffer[..count]);
+                    self.wal.write_all(&buffer[..count])?;
+                    remaining -= count as u64;
+                }
+                hash
             }
-            hash
         };
         self.wal
             .write_all(if compact { BLOCK_COMMIT } else { COMMIT })?;
@@ -762,6 +905,7 @@ impl Store {
         self.wal.sync_all()?;
         self.replay(pos + 16, len, compact)
     }
+
     pub fn view(&self, table: &str, transaction: Option<&Changes>) -> Result<View> {
         let committed = self.indexes.get(table);
         let overlay = transaction.and_then(|tx| tx.indexes.get(table));
@@ -774,9 +918,9 @@ impl Store {
             overlay: overlay.map(DiskIndex::reader).transpose()?,
             extra: overlay.map(DiskIndex::entries).transpose()?,
             wal: WalRead::Direct(File::open(&self.path)?),
-            blocks: BlockReader::default(),
+            blocks: BlockReader::new(self.stage_budget.clone()),
             staged: transaction
-                .map(|tx| File::open(&tx.path).map(WalRead::Direct))
+                .map(|tx| tx.stage.reader().map(WalRead::Stage))
                 .transpose()?,
         })
     }
@@ -1121,6 +1265,176 @@ mod tests {
                     .eq(vector.iter().map(|v| v.to_bits()))
             );
         }
+    }
+
+    #[test]
+    fn stage_payload_budget_is_shared_and_survives_reader_and_spill() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("mv-stage-{unique}-{}", std::process::id()));
+        let mut store = Store::open(&path).unwrap();
+        let mut first = store.changes(Catalog::new()).unwrap();
+        let mut second = store.changes(Catalog::new()).unwrap();
+        let first_path = first.root.with_extension("stage");
+        let second_path = second.root.with_extension("stage");
+
+        let row = |table: &str, key: i64, len: usize| Op::Put {
+            table: table.to_owned(),
+            key,
+            row: vec![
+                Value::Int(key),
+                Value::Text("z".repeat(len)),
+                Value::Vector(vec![0.0, -0.0, f32::from_bits(1)]),
+            ],
+        };
+        let length = 320 << 10;
+        first.push(row("first", 1, length)).unwrap();
+        let was_memory = !first_path.exists();
+        let mut reader = store.view("first", Some(&first)).unwrap();
+        second.push(row("second", 2, length)).unwrap();
+        let second_spilled = second_path.exists();
+        first.push(row("first", 3, 100)).unwrap();
+        let first_spilled = first_path.exists();
+        let previous = reader.read_at(Position::Staged(0)).unwrap();
+        let third_offset = first.get("first", 3).unwrap().unwrap().offset;
+        let mut new_reader = store.view("first", Some(&first)).unwrap();
+        let current = new_reader.read_at(Position::Staged(third_offset)).unwrap();
+        let mut second_reader = store.view("second", Some(&second)).unwrap();
+        let other = second_reader.read_at(Position::Staged(0)).unwrap();
+        drop((reader, new_reader, second_reader, first, second, store));
+        assert!(!first_path.exists() && !second_path.exists());
+        fs::remove_dir_all(path).unwrap();
+
+        assert!(was_memory, "small stages must start without a disk file");
+        assert!(second_spilled && first_spilled);
+        for (values, key, text_len) in
+            [(previous, 1, length), (current, 3, 100), (other, 2, length)]
+        {
+            assert_eq!(values[0].int().unwrap(), key);
+            assert!(matches!(&values[1], Value::Text(text) if text.len() == text_len));
+            assert!(matches!(&values[2], Value::Vector(values)
+                if values.iter().map(|f| f.to_bits()).eq([0, 0x8000_0000, 1])));
+        }
+    }
+
+    #[test]
+    fn held_budget_falls_back_to_legacy_then_compact_commit_recovers() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("mv-stage-pack-{unique}-{}", std::process::id()));
+        let mut store = Store::open(&path).unwrap();
+        let mut create = store.changes(Catalog::new()).unwrap();
+        create
+            .push(Op::Schema(Schema {
+                name: "t".into(),
+                columns: vec![
+                    crate::types::Column {
+                        name: "id".into(),
+                        kind: DataType::Bigint,
+                        primary: true,
+                    },
+                    crate::types::Column {
+                        name: "body".into(),
+                        kind: DataType::Varchar(256),
+                        primary: false,
+                    },
+                ],
+                primary: 0,
+                indexes: vec![],
+            }))
+            .unwrap();
+        store.commit(&create).unwrap();
+        drop(create);
+
+        let mut changes = store.changes(store.catalog.clone()).unwrap();
+        for key in 1..=8 {
+            changes
+                .push(Op::Put {
+                    table: "t".into(),
+                    key,
+                    row: vec![Value::Int(key), Value::Text("hello".repeat(40))],
+                })
+                .unwrap();
+        }
+
+        let position = store.wal.metadata().unwrap().len() as usize;
+        let held = store.stage_budget.reserve(512 << 10).unwrap();
+        store.commit(&changes).unwrap();
+        let compact_position = store.wal.metadata().unwrap().len() as usize;
+        drop(held);
+        store.commit(&changes).unwrap();
+        drop((changes, store));
+
+        let wal = fs::read(path.join("commits.mv1")).unwrap();
+        assert_eq!(&wal[position..position + HEADER.len()], HEADER);
+        assert_eq!(
+            &wal[compact_position..compact_position + BLOCK_HEADER.len()],
+            BLOCK_HEADER
+        );
+        let store = Store::open(&path).unwrap();
+        let view = store.view("t", None).unwrap();
+        let mut keys = view.map(|row| row.unwrap().key).collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(keys, (1..=8).collect::<Vec<_>>());
+        drop(store);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn first_nonempty_merge_adopts_staging_and_preserves_existing_offsets() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("mv-stage-adopt-{unique}-{}", std::process::id()));
+        let mut store = Store::open(&path).unwrap();
+        let mut transaction = store.changes(Catalog::new()).unwrap();
+        let empty_path = transaction.root.clone();
+        transaction
+            .merge(store.changes(Catalog::new()).unwrap())
+            .unwrap();
+        assert_eq!(transaction.root, empty_path);
+        let make_op = |key| Op::Put {
+            table: "t".into(),
+            key,
+            row: vec![Value::Int(key)],
+        };
+        let mut first = store.changes(Catalog::new()).unwrap();
+        first.push(make_op(1)).unwrap();
+        first.push(make_op(2)).unwrap();
+        let expected_path = first.root.clone();
+        let expected_offset = first.get("t", 2).unwrap().unwrap().offset;
+        transaction.merge(first).unwrap();
+        assert_eq!(transaction.root, expected_path);
+        assert_eq!(
+            transaction.get("t", 2).unwrap().unwrap().offset,
+            expected_offset
+        );
+        let mut later = store.changes(Catalog::new()).unwrap();
+        later.push(make_op(3)).unwrap();
+        transaction.merge(later).unwrap();
+        assert_eq!(transaction.root, expected_path);
+        assert_eq!(
+            transaction.get("t", 2).unwrap().unwrap().offset,
+            expected_offset
+        );
+        let current_offset = transaction.get("t", 3).unwrap().unwrap().offset;
+        assert!(current_offset > expected_offset);
+        let mut view = store.view("t", Some(&transaction)).unwrap();
+        assert_eq!(
+            view.read_at(Position::Staged(current_offset)).unwrap()[0]
+                .int()
+                .unwrap(),
+            3
+        );
+        drop((view, transaction, store));
+        fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

@@ -242,7 +242,7 @@ impl Engine {
             _ => unreachable!("control and query statements handled before staging"),
         };
         if let Some(tx) = &mut self.transaction {
-            tx.merge(&changes)?;
+            tx.merge(changes)?;
         } else {
             self.commit(&changes)?;
         }
