@@ -4,8 +4,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
 use crate::commit_block::{self, Block, RestoredRow};
 use crate::disk_index::{DiskIndex, Entries, Entry};
 use crate::position_index::{PositionBudget, PositionEntries, PositionIndex, PositionReader};
@@ -1034,7 +1032,7 @@ pub(crate) struct View {
     staged: Option<WalRead>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum Position {
     Committed(u64),
     Staged(u64),
