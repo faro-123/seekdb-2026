@@ -703,7 +703,7 @@ impl Store {
         let position_bytes = std::env::var("MINIVECTORDB_POSITION_BYTES")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(MAX_POSITION_BYTES)
+            .unwrap_or(0)
             .min(MAX_POSITION_BYTES);
         let position_budget = PositionBudget::new(stage_budget.clone(), position_bytes);
         let hot_bytes = std::env::var("MINIVECTORDB_HOT_BYTES")
