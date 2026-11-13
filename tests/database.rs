@@ -52,6 +52,41 @@ fn unordered_limit_preserves_legacy_rows_after_reopen() {
 }
 
 #[test]
+fn unordered_limit_cache_tracks_vector_index_and_transactions() {
+    let data = Data::new();
+    let responses = session(
+        &data,
+        &[
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, v VECTOR(1));".into(),
+            "INSERT INTO t VALUES (2,'[2]'),(1,'[1]');".into(),
+            "CREATE VECTOR INDEX vi ON t(v);".into(),
+            "SELECT id FROM t LIMIT 1;".into(),
+            "SELECT id,v FROM t LIMIT 1;".into(),
+            "SELECT id,v FROM t LIMIT 1;".into(),
+            "BEGIN;".into(),
+            "UPDATE t SET v='[9]' WHERE id=2;".into(),
+            "SELECT id,v FROM t LIMIT 1;".into(),
+            "ROLLBACK;".into(),
+            "SELECT id,v FROM t LIMIT 1;".into(),
+            "INSERT INTO t VALUES (0,'[0]');".into(),
+            "SELECT id,v FROM t LIMIT 1;".into(),
+            "DELETE FROM t WHERE id=0;".into(),
+            "SELECT id,v FROM t LIMIT 1;".into(),
+        ],
+    );
+    assert!(responses.iter().all(|response| response["ok"] == true));
+    assert_eq!(responses[3]["rows"], json!([[2]]));
+    assert_eq!(responses[4]["rows"], json!([[2, [2.0]]]));
+    assert_eq!(responses[5]["rows"], json!([[2, [2.0]]]));
+    assert_eq!(responses[8]["rows"], json!([[2, [9.0]]]));
+    assert_eq!(responses[10]["rows"], json!([[2, [2.0]]]));
+    assert_eq!(responses[12]["rows"], json!([[0, [0.0]]]));
+    assert_eq!(responses[14]["rows"], json!([[2, [2.0]]]));
+    let reopened = session(&data, &["SELECT id,v FROM t LIMIT 1;".into()]);
+    assert_eq!(reopened[0]["rows"], json!([[2, [2.0]]]));
+}
+
+#[test]
 fn malformed_insert_tail_takes_precedence_over_an_earlier_duplicate() {
     let responses = run(&[
         "CREATE TABLE t (id BIGINT PRIMARY KEY, s VARCHAR(20));",
