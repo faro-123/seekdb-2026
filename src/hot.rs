@@ -8,7 +8,9 @@ use crate::committed_cache::CommittedView;
 use crate::distance::{DistanceBounds, SquaredL2, supports_compact_screening};
 use crate::half;
 use crate::hot_text::{HotText, TextShape};
-use crate::packed_hot::{self, EncodedCoefficients, Kernel};
+use crate::packed_hot::{
+    self, COMPACT_DIM, CompactKernel, CompactRow, EncodedCoefficients, Kernel,
+};
 use crate::storage::VectorData;
 use crate::storage::{Field, HotRead, Store};
 use crate::types::{DataType, Schema, Value};
@@ -89,7 +91,15 @@ struct PackedSnapshot {
 struct IntegerSnapshot {
     kernel: Kernel,
     exponent: i16,
-    codes: Vec<i16>,
+    rows: IntegerRows,
+}
+
+enum IntegerRows {
+    Expanded(Vec<i16>),
+    Compact {
+        kernel: CompactKernel,
+        codes: Vec<CompactRow>,
+    },
 }
 
 enum SnapshotVectors {
@@ -99,8 +109,55 @@ enum SnapshotVectors {
 }
 
 impl IntegerSnapshot {
-    fn row(&self, slot: usize, dim: usize) -> &[i16] {
-        &self.codes[slot * dim..][..dim]
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+    fn capacity_bytes(&self) -> usize {
+        match &self.rows {
+            IntegerRows::Expanded(codes) => codes.capacity() * size_of::<i16>(),
+            IntegerRows::Compact { codes, .. } => codes.capacity() * size_of::<CompactRow>(),
+        }
+    }
+
+    fn push(&mut self, codes: EncodedCoefficients<'_>, dim: usize) -> bool {
+        if codes.exponent != self.exponent {
+            return false;
+        }
+        match &mut self.rows {
+            IntegerRows::Expanded(expanded) if expanded.len() + dim <= expanded.capacity() => {
+                codes.append_to(expanded);
+                true
+            }
+            IntegerRows::Compact { codes: packed, .. } if packed.len() < packed.capacity() => {
+                let Some(row) = codes.compact() else {
+                    return false;
+                };
+                packed.push(row);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn len(&self, dim: usize) -> usize {
+        match &self.rows {
+            IntegerRows::Expanded(codes) => codes.len() / dim,
+            IntegerRows::Compact { codes, .. } => codes.len(),
+        }
+    }
+
+    fn squared(&self, slot: usize, query: &[i16]) -> u64 {
+        match &self.rows {
+            IntegerRows::Expanded(codes) => {
+                let dim = query.len();
+                self.kernel
+                    .expanded_distance(&codes[slot * dim..][..dim], query)
+            }
+            IntegerRows::Compact { kernel, codes } => {
+                let query = query
+                    .first_chunk::<COMPACT_DIM>()
+                    .expect("bound compact dimension");
+                kernel.distance(&codes[slot], query)
+            }
+        }
     }
 
     fn expand<'a>(&self, slot: usize, dim: usize, out: &'a mut Vec<f32>) -> &'a [f32] {
@@ -108,11 +165,15 @@ impl IntegerSnapshot {
         out.clear();
         // At most 12 significant bits and a scale between 2^-149 and 2^116.
         // These values are exactly representable even at binary32 extremes.
-        out.extend(
-            self.row(slot, dim)
-                .iter()
-                .map(|&code| (f64::from(code) * scale) as f32),
-        );
+        let decode = |code| (f64::from(code) * scale) as f32;
+        match &self.rows {
+            IntegerRows::Expanded(codes) => {
+                out.extend(codes[slot * dim..][..dim].iter().copied().map(decode));
+            }
+            IntegerRows::Compact { codes, .. } => {
+                out.extend(codes[slot].coefficients().map(decode));
+            }
+        }
         out
     }
 }
@@ -140,6 +201,7 @@ enum VectorBuild<'a> {
     },
     Integer {
         kernel: Kernel,
+        compact: Option<CompactKernel>,
         query: &'a [f32],
     },
 }
@@ -351,9 +413,7 @@ impl HotTable {
             && let Some(query) = Kernel::query(q, integer.exponent).filter(|q| q.len() == self.dim)
         {
             return Ok(self.select_codes(k, integer.exponent, &matches, |slot| {
-                integer
-                    .kernel
-                    .expanded_distance(integer.row(slot, self.dim), &query)
+                integer.squared(slot, &query)
             }));
         }
         if let Some(hits) = self.select_packed(q, k, &matches)? {
@@ -505,12 +565,20 @@ impl HotTable {
         }
         let compact = matches!(build, VectorBuild::Copied { half: true });
         let integer = matches!(build, VectorBuild::Integer { .. });
+        let mut compact_kernel = match build {
+            VectorBuild::Integer { compact, .. } if dim == COMPACT_DIM => compact,
+            _ => None,
+        };
         let mut row_width = size_of::<HotRow>();
         if matches!(build, VectorBuild::Mapped { .. }) {
             row_width += size_of::<PackedLocation>();
         }
         if integer {
-            row_width += dim * size_of::<i16>();
+            row_width += if compact_kernel.is_some() {
+                size_of::<CompactRow>()
+            } else {
+                dim * size_of::<i16>()
+            };
         }
         // Include table name, column descriptors, and each text column's initial offset.
         let mut bytes = size_of::<Self>()
@@ -574,11 +642,21 @@ impl HotTable {
                         let Some(codes) = coefficients(values) else {
                             return Ok(false);
                         };
-                        if let Some(expected) = exponent {
-                            return Ok(expected == codes.exponent);
+                        let scale = codes.exponent;
+                        if compact_kernel.is_some() && !codes.fits_compact() {
+                            compact_kernel = None;
+                            let difference = dim * size_of::<i16>() - size_of::<CompactRow>();
+                            row_width += difference;
+                            bytes += rows * difference;
                         }
-                        exponent = Some(codes.exponent);
-                        return Ok(Kernel::compatible(query, codes.exponent));
+                        if bytes > budget {
+                            return Ok(false);
+                        }
+                        if let Some(expected) = exponent {
+                            return Ok(expected == scale);
+                        }
+                        exponent = Some(scale);
+                        return Ok(Kernel::compatible(query, scale));
                     }
                     if compact {
                         expanded.clear();
@@ -627,7 +705,13 @@ impl HotTable {
                 SnapshotVectors::Integer(IntegerSnapshot {
                     kernel,
                     exponent,
-                    codes: Vec::with_capacity(rows * dim),
+                    rows: match compact_kernel {
+                        Some(kernel) => IntegerRows::Compact {
+                            kernel,
+                            codes: Vec::with_capacity(rows),
+                        },
+                        None => IntegerRows::Expanded(Vec::with_capacity(rows * dim)),
+                    },
                 })
             }
             VectorBuild::Copied { .. } => {
@@ -658,6 +742,11 @@ impl HotTable {
         };
         last_start = 0;
         let mut released = 0;
+        let release_bytes = if compact_kernel.is_some() {
+            16 << 10
+        } else {
+            RELEASE_BYTES
+        };
         let complete = scan_rows(store, schema, embedding, fields, &mut buffer, |cell| {
             match cell {
                 Cell::Row(key, offset) if table.rows.len() < rows => {
@@ -669,7 +758,7 @@ impl HotTable {
                         last_start = start;
                         // All previous fields are copied. The current row may
                         // share a block with later rows, so keep its first page.
-                        if start - released >= RELEASE_BYTES {
+                        if start - released >= release_bytes {
                             store.release_consumed_pages(released, start);
                             released = start;
                         }
@@ -693,12 +782,9 @@ impl HotTable {
                         let Some(codes) = coefficients(values) else {
                             return Ok(false);
                         };
-                        if codes.exponent != snapshot.exponent
-                            || snapshot.codes.len() + dim > snapshot.codes.capacity()
-                        {
+                        if !snapshot.push(codes, dim) {
                             return Ok(false);
                         }
-                        codes.append_to(&mut snapshot.codes);
                     }
                     SnapshotVectors::Copied(vectors) if !compact => {
                         let raw = &mut vectors.raw;
@@ -730,7 +816,7 @@ impl HotTable {
         })?;
         let vector_count_matches = match &table.vectors {
             SnapshotVectors::Packed(snapshot) => snapshot.locations.len() == rows,
-            SnapshotVectors::Integer(snapshot) => snapshot.codes.len() == rows * dim,
+            SnapshotVectors::Integer(snapshot) => snapshot.len(dim) == rows,
             SnapshotVectors::Copied(vectors) => {
                 vectors.half.len() == packed * dim && vectors.raw.len() == (rows - packed) * dim
             }
@@ -814,6 +900,7 @@ pub(crate) struct HotCache {
     compact: bool,
     mapped: Option<Kernel>,
     expanded: bool,
+    compact_integer: Option<CompactKernel>,
     snapshot: Snapshot,
 }
 
@@ -836,6 +923,9 @@ impl HotCache {
             }),
             expanded: cfg!(target_os = "linux")
                 && std::env::var_os("MINIVECTORDB_EXPANDED_HOT").is_none_or(|value| value != "0"),
+            compact_integer: CompactKernel::detect().filter(|_| {
+                std::env::var_os("MINIVECTORDB_COMPACT_HOT11").is_none_or(|value| value != "0")
+            }),
             snapshot: Snapshot::Empty,
         }
     }
@@ -926,7 +1016,11 @@ impl HotCache {
                     vector,
                     &all[..scalars],
                     expanded_budget,
-                    VectorBuild::Integer { kernel, query },
+                    VectorBuild::Integer {
+                        kernel,
+                        compact: self.compact_integer,
+                        query,
+                    },
                 )?
             {
                 self.snapshot = Snapshot::Ready(table);
@@ -1082,7 +1176,12 @@ mod tests {
             .get(&mut store, &schema, 1, &[], Some(&[0.0; 128]))
             .unwrap()
             .unwrap();
-        assert!(matches!(table.vectors, SnapshotVectors::Integer(_)));
+        let SnapshotVectors::Integer(integer) = &table.vectors else {
+            panic!("eligible rows must use the integer snapshot");
+        };
+        if CompactKernel::detect().is_some() {
+            assert_eq!(integer.capacity_bytes(), 3 * size_of::<CompactRow>());
+        }
         for query in [0.0, 0.5] {
             let q = [query; 128];
             let hits = table.select(&q, 3, |_| true).unwrap();

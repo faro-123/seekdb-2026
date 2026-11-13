@@ -57,6 +57,101 @@ impl<'a> EncodedCoefficients<'a> {
     pub fn append_to(self, out: &mut Vec<i16>) {
         out.extend((0..self.count).map(|i| scalar_at(self.payload, i, self.header)));
     }
+
+    pub fn fits_compact(&self) -> bool {
+        self.count == COMPACT_DIM
+            && (0..self.count)
+                .all(|i| (-1024..=1023).contains(&scalar_at(self.payload, i, self.header)))
+    }
+
+    pub fn compact(self) -> Option<CompactRow> {
+        if self.count != COMPACT_DIM {
+            return None;
+        }
+        let mut row = CompactRow([[0; 22]; COMPACT_DIM / 16]);
+        for (group_index, group) in row.0.iter_mut().enumerate() {
+            let mut high_bits = 0_u64;
+            for lane in 0..8 {
+                let index = group_index * 16 + lane;
+                let low = compact_code(scalar_at(self.payload, index, self.header))?;
+                let high = compact_code(scalar_at(self.payload, index + 8, self.header))?;
+                let word = low | ((high & 0x1f) << 11);
+                group[lane * 2..lane * 2 + 2].copy_from_slice(&word.to_le_bytes());
+                high_bits |= u64::from(high >> 5) << (6 * lane);
+            }
+            group[16..].copy_from_slice(&high_bits.to_le_bytes()[..6]);
+        }
+        Some(row)
+    }
+}
+
+pub(crate) const COMPACT_DIM: usize = 128;
+
+/// The low eight coefficients occupy eleven bits of each word. The other
+/// eight use the remaining five bits and six bits each in the group suffix.
+pub(crate) struct CompactRow([[u8; 22]; COMPACT_DIM / 16]);
+
+fn compact_code(code: i16) -> Option<u16> {
+    (-1024..=1023)
+        .contains(&code)
+        .then(|| u16::from_le_bytes(code.to_le_bytes()) & 0x07ff)
+}
+
+fn high_bits(group: &[u8; 22]) -> u64 {
+    let mut bytes = [0; 8];
+    bytes[..6].copy_from_slice(&group[16..]);
+    u64::from_le_bytes(bytes)
+}
+
+impl CompactRow {
+    pub fn coefficients(&self) -> impl Iterator<Item = i16> + '_ {
+        self.0.iter().flat_map(|group| {
+            let upper = high_bits(group);
+            (0..16).map(move |lane| {
+                let index = (lane % 8) * 2;
+                let word = u16::from_le_bytes([group[index], group[index + 1]]);
+                let bits = if lane < 8 {
+                    word
+                } else {
+                    (word >> 11) | (((upper >> ((lane - 8) * 6)) & 0x3f) as u16) << 5
+                };
+                i16::from_le_bytes((bits << 5).to_le_bytes()) >> 5
+            })
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CompactKernel(());
+
+impl CompactKernel {
+    pub fn detect() -> Option<Self> {
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("bmi2")
+        {
+            return Some(Self(()));
+        }
+        None
+    }
+
+    #[cfg_attr(target_arch = "x86_64", allow(unsafe_code))]
+    pub fn distance(self, row: &CompactRow, query: &[i16; COMPACT_DIM]) -> u64 {
+        debug_assert!(query.iter().all(|&v| i32::from(v).abs() <= MAX_COEFFICIENT));
+        #[cfg(target_arch = "x86_64")]
+        {
+            // SAFETY: the kernel token requires both CPU features. The row and
+            // query types bound every load and the caller checked query codes.
+            unsafe { simd::compact(row, query) }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            row.coefficients()
+                .zip(query)
+                .map(|(a, &b)| squared(a, b))
+                .sum()
+        }
+    }
 }
 
 /// Interpret the first field of a WAL suffix. The field may be followed by
@@ -299,6 +394,32 @@ mod simd {
         lanes.into_iter().map(|lane| lane as u64).sum()
     }
 
+    #[target_feature(enable = "avx2,bmi2")]
+    pub(super) fn compact(row: &super::CompactRow, query: &[i16; super::COMPACT_DIM]) -> u64 {
+        let mut acc = _mm256_setzero_si256();
+        for (group, q) in row.0.iter().zip(query.as_chunks::<16>().0) {
+            // SAFETY: unaligned loads cover 16 bytes of group and all 32 bytes of q.
+            let (words, needle) = unsafe {
+                (
+                    _mm_loadu_si128(group.as_ptr().cast()),
+                    _mm256_loadu_si256(q.as_ptr().cast()),
+                )
+            };
+            let lanes = _pdep_u64(super::high_bits(group), 0x3f3f_3f3f_3f3f_3f3f);
+            let bytes = _mm_cvtsi64_si128(i64::from_le_bytes(lanes.to_le_bytes()));
+            let high = _mm_or_si128(
+                _mm_srli_epi16::<11>(words),
+                _mm_slli_epi16::<5>(_mm_cvtepu8_epi16(bytes)),
+            );
+            let codes = _mm256_set_m128i(high, words);
+            let signed = _mm256_srai_epi16::<5>(_mm256_slli_epi16::<5>(codes));
+            let diff = _mm256_sub_epi16(signed, needle);
+            // A lane receives 8 * 2 * 5119^2 at most, below i32::MAX.
+            acc = _mm256_add_epi32(acc, _mm256_madd_epi16(diff, diff));
+        }
+        widen(acc)
+    }
+
     #[target_feature(enable = "avx2")]
     pub(super) fn expanded(row: &[i16], query: &[i16]) -> u64 {
         let (rows, tail) = row.as_chunks::<16>();
@@ -422,6 +543,41 @@ mod tests {
             kernel.distance(&[], 0, -4095, &[4095; 513]),
             513 * 8190_u64 * 8190
         );
+    }
+
+    #[test]
+    fn compact_encoding_preserves_actual_codes_and_exact_distance() {
+        // This header's theoretical upper bound exceeds the compact range.
+        let layout = Header {
+            base: -1000,
+            width: 11,
+        };
+        let header = VectorHeader::parse(&[246, 255, 11, 24, 252, 255, 255]);
+        let mut state = 0x19c2_5072_u32;
+        for trial in 0..4096 {
+            let row: [i16; COMPACT_DIM] = std::array::from_fn(|_| {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                i16::try_from((state >> 16) % 2024).unwrap() - 1000
+            });
+            let query = std::array::from_fn(|i| match (trial % 3, i % 2) {
+                (0, _) => 4095,
+                (1, 0) => -4095,
+                _ => row[(i + 37) % COMPACT_DIM],
+            });
+            let payload = pack(&row, layout);
+            let codes = EncodedCoefficients::new(header, COMPACT_DIM, &payload).unwrap();
+            assert!(codes.fits_compact());
+            let compact = codes.compact().unwrap();
+            assert!(compact.coefficients().eq(row));
+            if let Some(kernel) = CompactKernel::detect() {
+                let exact: u64 = row.iter().zip(query).map(|(&a, b)| squared(a, b)).sum();
+                assert_eq!(kernel.distance(&compact, &query), exact);
+            }
+        }
+        let out_of_range = pack(&[1024; COMPACT_DIM], layout);
+        let codes = EncodedCoefficients::new(header, COMPACT_DIM, &out_of_range).unwrap();
+        assert!(!codes.fits_compact());
+        assert!(codes.compact().is_none());
     }
 
     #[test]
