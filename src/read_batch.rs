@@ -5,6 +5,7 @@ use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom};
 use crate::Result;
 use crate::committed_cache::CommittedView;
 use crate::disk_index::Entry;
+use crate::position_index::PositionEntries;
 use crate::stage::StageRead;
 
 const BATCH_ENTRIES: usize = 4096;
@@ -13,6 +14,8 @@ const READ_BYTES: usize = 8192;
 pub(crate) struct OffsetBatch<I> {
     source: I,
     ordered: bool,
+    increasing_offsets: bool,
+    lookahead: Option<Result<Entry>>,
     batch: Vec<Entry>,
     cursor: usize,
 }
@@ -22,6 +25,8 @@ impl<I> OffsetBatch<I> {
         Self {
             source,
             ordered: false,
+            increasing_offsets: false,
+            lookahead: None,
             batch: Vec::new(),
             cursor: 0,
         }
@@ -29,14 +34,31 @@ impl<I> OffsetBatch<I> {
 
     pub fn ordered(mut self) -> Self {
         self.ordered = true;
-        self.batch = Vec::with_capacity(BATCH_ENTRIES);
+        if !self.increasing_offsets {
+            self.batch = Vec::with_capacity(BATCH_ENTRIES);
+        }
         self
     }
 
     pub fn nearby(&self, offset: u64) -> bool {
-        self.batch
-            .get(self.cursor)
-            .is_some_and(|next| next.offset >= offset && next.offset - offset < READ_BYTES as u64)
+        let next = if self.increasing_offsets {
+            self.lookahead
+                .as_ref()
+                .and_then(|entry| entry.as_ref().ok())
+        } else {
+            self.batch.get(self.cursor)
+        };
+        next.is_some_and(|next| next.offset >= offset && next.offset - offset < READ_BYTES as u64)
+    }
+}
+
+impl OffsetBatch<PositionEntries> {
+    pub fn from_positions(source: PositionEntries) -> Self {
+        let increasing_offsets = source.increasing_offsets();
+        Self {
+            increasing_offsets,
+            ..Self::new(source)
+        }
     }
 }
 
@@ -46,6 +68,11 @@ impl<I: Iterator<Item = Result<Entry>>> Iterator for OffsetBatch<I> {
     fn next(&mut self) -> Option<Self::Item> {
         if !self.ordered {
             return self.source.next();
+        }
+        if self.increasing_offsets {
+            let next = self.lookahead.take().or_else(|| self.source.next())?;
+            self.lookahead = self.source.next();
+            return Some(next);
         }
         if self.cursor == self.batch.len() {
             self.batch.clear();

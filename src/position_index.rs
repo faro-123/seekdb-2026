@@ -10,6 +10,7 @@ use crate::stage::{Budget, Reservation};
 const PAGE_SLOTS: usize = 512;
 const BITMAP_WORDS: usize = PAGE_SLOTS / u64::BITS as usize;
 const MAX_PAGES: usize = 64;
+const MAX_PAGE_RUNS: usize = 8;
 const MAX_SPAN_PAGES: u64 = 128;
 // Admit a few pages before using occupied slots to distinguish a dense run
 // from isolated keys. Use the span as well so extreme keys spill immediately.
@@ -18,6 +19,7 @@ const MIN_OCCUPIED_PER_PAGE: usize = 12;
 const ALLOCATION_ALLOWANCE: usize = 64;
 const OWNER_BYTES: usize = size_of::<Resident>() + ALLOCATION_ALLOWANCE;
 const PAGE_BYTES: usize = size_of::<Page>() + ALLOCATION_ALLOWANCE;
+const DENSE_BYTES: usize = size_of::<[u64; PAGE_SLOTS]>() + ALLOCATION_ALLOWANCE;
 
 #[derive(Clone)]
 pub(crate) struct PositionBudget(Rc<BudgetState>);
@@ -93,8 +95,87 @@ impl Drop for Charge {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct Run {
+    start: u64,
+    stride: u64,
+    first: u16,
+    end: u16,
+}
+
+impl Run {
+    fn append(&mut self, slot: u16, offset: u64) -> bool {
+        if slot != self.end {
+            return false;
+        }
+        let ordinal = u64::from(slot - self.first);
+        let Some(delta) = offset.checked_sub(self.start) else {
+            return false;
+        };
+        if ordinal == 1 {
+            self.stride = delta;
+        } else if self.stride.checked_mul(ordinal) != Some(delta) {
+            return false;
+        }
+        self.end += 1;
+        true
+    }
+
+    fn at(&self, slot: u16) -> Option<u64> {
+        // The append check bounds both the multiplication and sum.
+        (self.first..self.end)
+            .contains(&slot)
+            .then(|| self.start + u64::from(slot - self.first) * self.stride)
+    }
+}
+
+struct Runs {
+    items: [Run; MAX_PAGE_RUNS],
+    len: usize,
+}
+
+impl Runs {
+    fn append(&mut self, slot: u16, offset: u64) -> bool {
+        if self.len != 0 {
+            let last = &mut self.items[self.len - 1];
+            if last.append(slot, offset) {
+                return true;
+            }
+            if slot < last.end {
+                return false;
+            }
+        }
+        let Some(next) = self.items.get_mut(self.len) else {
+            return false;
+        };
+        *next = Run {
+            start: offset,
+            stride: 0,
+            first: slot,
+            end: slot + 1,
+        };
+        self.len += 1;
+        true
+    }
+
+    fn at(&self, slot: u16) -> Option<u64> {
+        self.items[..self.len]
+            .iter()
+            .rev()
+            .find_map(|run| run.at(slot))
+    }
+}
+
+enum Offsets {
+    Runs(Runs),
+    Dense {
+        values: Box<[u64; PAGE_SLOTS]>,
+        _charge: Charge,
+    },
+}
+
 struct Page {
-    offsets: [u64; PAGE_SLOTS],
+    offsets: Offsets,
     occupied: [u64; BITMAP_WORDS],
     live: [u64; BITMAP_WORDS],
 }
@@ -102,7 +183,10 @@ struct Page {
 impl Page {
     fn new() -> Self {
         Self {
-            offsets: [0; PAGE_SLOTS],
+            offsets: Offsets::Runs(Runs {
+                items: [Run::default(); MAX_PAGE_RUNS],
+                len: 0,
+            }),
             occupied: [0; BITMAP_WORDS],
             live: [0; BITMAP_WORDS],
         }
@@ -112,7 +196,26 @@ impl Page {
         (slot / 64, 1 << (slot % 64))
     }
 
-    fn set(&mut self, slot: usize, entry: Entry) -> bool {
+    fn set(&mut self, slot: usize, entry: Entry, budget: &PositionBudget) -> Option<bool> {
+        match &mut self.offsets {
+            Offsets::Runs(runs) => {
+                if !runs.append(slot as u16, entry.offset) {
+                    let charge = budget.reserve(DENSE_BYTES)?;
+                    let mut values = Box::new([0; PAGE_SLOTS]);
+                    for run in &runs.items[..runs.len] {
+                        for i in run.first..run.end {
+                            values[usize::from(i)] = run.at(i).expect("slot within its run");
+                        }
+                    }
+                    values[slot] = entry.offset;
+                    self.offsets = Offsets::Dense {
+                        values,
+                        _charge: charge,
+                    };
+                }
+            }
+            Offsets::Dense { values, .. } => values[slot] = entry.offset,
+        }
         let (word, bit) = Self::bit(slot);
         let inserted = self.occupied[word] & bit == 0;
         self.occupied[word] |= bit;
@@ -121,8 +224,7 @@ impl Page {
         } else {
             self.live[word] |= bit;
         }
-        self.offsets[slot] = entry.offset;
-        inserted
+        Some(inserted)
     }
 
     fn entry(&self, number: i64, slot: usize) -> Entry {
@@ -131,7 +233,10 @@ impl Page {
             // An i64 key divided by 512 with Euclidean remainder always
             // reconstructs within i64, including both extreme keys.
             key: number * PAGE_SLOTS as i64 + slot as i64,
-            offset: self.offsets[slot],
+            offset: match &self.offsets {
+                Offsets::Runs(runs) => runs.at(slot as u16).expect("occupied slot in a run"),
+                Offsets::Dense { values, .. } => values[slot],
+            },
             deleted: self.live[word] & bit == 0,
         }
     }
@@ -154,6 +259,8 @@ struct Resident {
     pages: [Option<PageSlot>; MAX_PAGES],
     page_count: usize,
     occupied_count: usize,
+    increasing_offsets: bool,
+    last: Option<(i64, u64)>,
     _charge: Charge,
 }
 
@@ -164,6 +271,8 @@ impl Resident {
             pages: std::array::from_fn(|_| None),
             page_count: 0,
             occupied_count: 0,
+            increasing_offsets: true,
+            last: None,
             _charge: charge,
         }))
     }
@@ -236,9 +345,16 @@ impl Resident {
         let page = self.pages[index]
             .as_mut()
             .expect("initialized position page");
-        if page.data.set(slot, entry) {
-            self.occupied_count += 1;
-        }
+        let Some(inserted) = page.data.set(slot, entry, budget) else {
+            return false;
+        };
+        self.occupied_count += usize::from(inserted);
+        self.increasing_offsets &= inserted
+            && !entry.deleted
+            && self
+                .last
+                .is_none_or(|(key, offset)| key < entry.key && offset < entry.offset);
+        self.last = Some((entry.key, entry.offset));
         true
     }
 }
@@ -388,6 +504,12 @@ pub(crate) struct PositionEntries {
     inner: Iter,
 }
 
+impl PositionEntries {
+    pub fn increasing_offsets(&self) -> bool {
+        matches!(&self.inner, Iter::Resident(rows) if rows.rows.increasing_offsets)
+    }
+}
+
 impl Iterator for PositionEntries {
     type Item = Result<Entry>;
 
@@ -443,6 +565,56 @@ mod tests {
             .collect();
         rows.sort_unstable();
         rows
+    }
+
+    #[test]
+    fn consecutive_block_positions_use_bounded_resident_pages() {
+        let dir = TempDir::new();
+        let budget = PositionBudget::new(Budget::default(), 192 << 10);
+        let mut primary = PositionIndex::create(dir.0.join("primary"), budget.clone()).unwrap();
+        let mut vectors = PositionIndex::create(dir.0.join("vectors"), budget.clone()).unwrap();
+        for key in 0..2048 {
+            let block = u64::try_from(key / 100).unwrap();
+            let ordinal = u64::try_from(key % 100).unwrap();
+            primary
+                .put(entry(key, (1 << 63) + (block << 28) + ordinal, false))
+                .unwrap();
+            vectors
+                .put(entry(
+                    key,
+                    block * 32768 + ordinal * (195 + block % 3),
+                    false,
+                ))
+                .unwrap();
+        }
+        assert!(
+            budget.0.used.get() < 12 << 10,
+            "used {} bytes",
+            budget.0.used.get()
+        );
+        for key in 0..2048 {
+            let block = u64::try_from(key / 100).unwrap();
+            let ordinal = u64::try_from(key % 100).unwrap();
+            assert_eq!(
+                primary.get(key).unwrap().unwrap().offset,
+                (1 << 63) + (block << 28) + ordinal
+            );
+            assert_eq!(
+                vectors.get(key).unwrap().unwrap().offset,
+                block * 32768 + ordinal * (195 + block % 3)
+            );
+        }
+        assert!(primary.entries().unwrap().increasing_offsets());
+        assert!(vectors.entries().unwrap().increasing_offsets());
+        let mut reader = vectors.reader().unwrap();
+        assert_eq!(reader.get(7).unwrap().unwrap().offset, 7 * 195);
+        drop(reader);
+        vectors.put(entry(7, u64::MAX, false)).unwrap();
+        assert!(!vectors.entries().unwrap().increasing_offsets());
+        assert_eq!(vectors.get(7).unwrap().unwrap().offset, u64::MAX);
+        assert_eq!(vectors.get(8).unwrap().unwrap().offset, 8 * 195);
+        assert_eq!(primary.entries().unwrap().count(), 2048);
+        assert_eq!(vectors.entries().unwrap().count(), 2048);
     }
 
     #[test]
@@ -519,15 +691,17 @@ mod tests {
     fn shared_cap_counts_both_indexes_and_uses_one_stage_reservation() {
         let dir = TempDir::new();
         let stage = Budget::default();
-        let cap = 2 * (OWNER_BYTES + 256) + PAGE_BYTES;
+        let row_path = dir.0.join("rows");
+        let vector_path = dir.0.join("vectors");
+        let cap = 2 * OWNER_BYTES + row_path.capacity() + vector_path.capacity() + PAGE_BYTES;
         let budget = PositionBudget::new(stage.clone(), cap);
         assert_eq!(budget.0.cap, cap);
         let room = stage.reserve((1024 - 112) * 1024 - cap).unwrap();
         assert!(stage.reserve(1).is_none());
         drop(room);
 
-        let mut row = PositionIndex::create(dir.0.join("rows"), budget.clone()).unwrap();
-        let mut vector = PositionIndex::create(dir.0.join("vectors"), budget.clone()).unwrap();
+        let mut row = PositionIndex::create(row_path, budget.clone()).unwrap();
+        let mut vector = PositionIndex::create(vector_path, budget.clone()).unwrap();
         row.put(entry(0, 11, false)).unwrap();
         vector.put(entry(0, 12, false)).unwrap();
         assert!(matches!(&row.backend, Backend::Resident { .. }));

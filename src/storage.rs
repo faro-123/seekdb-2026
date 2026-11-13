@@ -794,7 +794,7 @@ impl Store {
         let mut index = PositionIndex::create(self.temp("vectors"), self.position_budget.clone())?;
         let mut log = self.wal_reader()?.buffered();
         let mut blocks = BlockReader::new(self.stage_budget.clone());
-        let mut slots = OffsetBatch::new(self.indexes[table].entries()?).ordered();
+        let mut slots = OffsetBatch::from_positions(self.indexes[table].entries()?).ordered();
         while let Some(slot) = slots.next() {
             let slot = slot?;
             if slot.deleted {
@@ -1093,7 +1093,7 @@ impl Store {
             base: committed
                 .map(PositionIndex::entries)
                 .transpose()?
-                .map(OffsetBatch::new),
+                .map(OffsetBatch::from_positions),
             base_lookup: committed.map(PositionIndex::reader).transpose()?,
             overlay: overlay.map(StageIndex::reader).transpose()?,
             extra: overlay.map(StageIndex::entries).transpose()?,
@@ -1113,7 +1113,7 @@ impl Store {
             .get(&schema.name)
             .ok_or_else(|| corrupt("vector index missing"))?;
         Ok(VectorView {
-            slots: OffsetBatch::new(index.entries()?),
+            slots: OffsetBatch::from_positions(index.entries()?),
             log: self.wal_reader()?,
             dim,
             buffer: Vec::new(),
