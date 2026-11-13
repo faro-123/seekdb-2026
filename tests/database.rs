@@ -621,3 +621,26 @@ fn spill_from_failed_statement_keeps_prior_transaction_and_recovery() {
     let reopened = session(&data, &["SELECT id,body FROM t ORDER BY id;".into()]);
     assert_eq!(reopened[0]["rows"], expected);
 }
+
+#[test]
+fn a_late_insert_syntax_error_never_publishes_staged_rows() {
+    let data = Data::new();
+    let result = session(
+        &data,
+        &[
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, s VARCHAR(24));".into(),
+            "BEGIN;".into(),
+            "INSERT INTO t VALUES (1,'earlier');".into(),
+            "/* prefix */ INSERT INTO `T` (s,id) VALUES ('can''t',2),('逗号,括号)',3),('unfinished"
+                .into(),
+            "SELECT id,s FROM t ORDER BY id;".into(),
+            "INSERT INTO t VALUES (4,'after') /* still valid */;".into(),
+            "COMMIT;".into(),
+        ],
+    );
+    assert_eq!(result[3]["error"]["code"], "unsupported_sql");
+    assert_eq!(result[4]["rows"], json!([[1, "earlier"]]));
+    assert_eq!(result[5]["affected_rows"], 1);
+    let reply = session(&data, &["SELECT id,s FROM t ORDER BY id;".into()]);
+    assert_eq!(reply[0]["rows"], json!([[1, "earlier"], [4, "after"]]));
+}

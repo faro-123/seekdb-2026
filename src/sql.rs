@@ -36,8 +36,8 @@ pub(crate) struct Select {
     pub order: Vec<(Expr, bool)>,
     pub limit: Option<usize>,
 }
-#[derive(Clone, Debug)]
-pub(crate) enum Statement {
+#[derive(Debug)]
+pub(crate) enum Statement<'a> {
     Create(Schema),
     Index {
         name: String,
@@ -47,7 +47,7 @@ pub(crate) enum Statement {
     Insert {
         table: String,
         columns: Option<Vec<String>>,
-        rows: Vec<Vec<Literal>>,
+        rows: InsertRows<'a>,
     },
     Update {
         table: String,
@@ -68,106 +68,112 @@ fn syntax(message: &str) -> Error {
     Error::new("unsupported_sql", message)
 }
 
-fn lex(sql: &str) -> Result<Vec<Token>> {
-    let mut chars = sql.chars().peekable();
-    let mut tokens = Vec::new();
-    while let Some(c) = chars.next() {
-        if c.is_whitespace() {
-            continue;
-        }
-        match c {
-            '\'' => {
-                let mut text = String::new();
-                loop {
-                    match chars.next() {
-                        Some('\'') if chars.peek() == Some(&'\'') => {
-                            chars.next();
-                            text.push('\'');
-                        }
-                        Some('\'') => break,
-                        Some(x) => text.push(x),
-                        None => return Err(syntax("unterminated string")),
-                    }
-                }
-                tokens.push(Token::Text(text));
-            }
-            '`' => {
-                let mut name = String::new();
-                loop {
-                    match chars.next() {
-                        Some('`') => break,
-                        Some(x) => name.push(x),
-                        None => return Err(syntax("unterminated identifier")),
-                    }
-                }
-                if name.is_empty() {
-                    return Err(syntax("empty identifier"));
-                }
-                tokens.push(Token::QuotedIdentifier(name.to_lowercase()));
-            }
-            '-' if chars.peek() == Some(&'-') => {
-                for x in chars.by_ref() {
-                    if x == '\n' {
-                        break;
-                    }
-                }
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                let mut closed = false;
-                while let Some(x) = chars.next() {
-                    if x == '*' && chars.peek() == Some(&'/') {
-                        chars.next();
-                        closed = true;
-                        break;
-                    }
-                }
-                if !closed {
-                    return Err(syntax("unterminated comment"));
-                }
-            }
-            '(' | ')' | ',' | ';' | '*' => tokens.push(Token::Symbol(c)),
-            '=' | '<' | '>' => {
-                let mut op = c.to_string();
-                if chars.peek() == Some(&'=') {
-                    op.push(chars.next().unwrap());
-                }
-                tokens.push(Token::Compare(op));
-            }
-            x if x.is_ascii_digit() || x == '-' || x == '+' || x == '.' => {
-                let mut text = x.to_string();
-                while chars
-                    .peek()
-                    .is_some_and(|x| x.is_ascii_digit() || matches!(x, '.' | 'e' | 'E' | '+' | '-'))
-                {
-                    text.push(chars.next().unwrap());
-                }
-                tokens.push(Token::Number(text));
-            }
-            x if x.is_alphabetic() || x == '_' => {
-                let mut text = x.to_string();
-                while chars
-                    .peek()
-                    .is_some_and(|x| x.is_alphanumeric() || *x == '_')
-                {
-                    text.push(chars.next().unwrap());
-                }
-                tokens.push(Token::Word(text.to_lowercase()));
-            }
-            _ => return Err(syntax("unexpected character")),
-        }
-    }
-    Ok(tokens)
+#[derive(Debug)]
+struct Lexer<'a> {
+    rest: &'a str,
 }
 
-struct Parser {
-    tokens: Vec<Token>,
-    pos: usize,
+impl<'a> Lexer<'a> {
+    fn token(&mut self) -> Result<Option<Token>> {
+        loop {
+            let input = self.rest.trim_start_matches(char::is_whitespace);
+            let Some(first) = input.chars().next() else {
+                self.rest = "";
+                return Ok(None);
+            };
+            if let Some(comment) = input.strip_prefix("--") {
+                self.rest = comment.split_once('\n').map_or("", |(_, rest)| rest);
+                continue;
+            }
+            if let Some(comment) = input.strip_prefix("/*") {
+                let (_, rest) = comment
+                    .split_once("*/")
+                    .ok_or_else(|| syntax("unterminated comment"))?;
+                self.rest = rest;
+                continue;
+            }
+            let tail = &input[first.len_utf8()..];
+            let (token, rest) = match first {
+                '\'' => {
+                    let mut start = 0;
+                    let end = loop {
+                        let quote = start
+                            + tail[start..]
+                                .find('\'')
+                                .ok_or_else(|| syntax("unterminated string"))?;
+                        if tail.as_bytes().get(quote + 1) != Some(&b'\'') {
+                            break quote;
+                        }
+                        start = quote + 2;
+                    };
+                    let content = &tail[..end];
+                    let text = if start == 0 {
+                        content.to_owned()
+                    } else {
+                        content.replace("''", "'")
+                    };
+                    (Token::Text(text), &tail[end + 1..])
+                }
+                '\x60' => {
+                    let (name, rest) = tail
+                        .split_once('\x60')
+                        .ok_or_else(|| syntax("unterminated identifier"))?;
+                    if name.is_empty() {
+                        return Err(syntax("empty identifier"));
+                    }
+                    (Token::QuotedIdentifier(name.to_lowercase()), rest)
+                }
+                '(' | ')' | ',' | ';' | '*' => (Token::Symbol(first), tail),
+                '=' | '<' | '>' => {
+                    let len = 1 + usize::from(tail.starts_with('='));
+                    (Token::Compare(input[..len].to_owned()), &input[len..])
+                }
+                c if c.is_ascii_digit() || matches!(c, '-' | '+' | '.') => {
+                    let len = 1 + tail
+                        .find(|c: char| {
+                            !c.is_ascii_digit() && !matches!(c, '.' | 'e' | 'E' | '+' | '-')
+                        })
+                        .unwrap_or(tail.len());
+                    (Token::Number(input[..len].to_owned()), &input[len..])
+                }
+                c if c.is_alphabetic() || c == '_' => {
+                    let len = c.len_utf8()
+                        + tail
+                            .find(|c: char| !c.is_alphanumeric() && c != '_')
+                            .unwrap_or(tail.len());
+                    (Token::Word(input[..len].to_lowercase()), &input[len..])
+                }
+                _ => return Err(syntax("unexpected character")),
+            };
+            self.rest = rest;
+            return Ok(Some(token));
+        }
+    }
 }
-impl Parser {
+
+impl Iterator for Lexer<'_> {
+    type Item = Result<Token>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.token() {
+            Ok(token) => token.map(Ok),
+            Err(error) => {
+                self.rest = "";
+                Some(Err(error))
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Parser<'a> {
+    tokens: std::iter::Peekable<Lexer<'a>>,
+}
+
+impl<'a> Parser<'a> {
     fn word(&mut self, word: &str) -> bool {
-        if matches!(self.tokens.get(self.pos),Some(Token::Word(w)) if w==word) {
-            self.pos += 1;
+        if matches!(self.tokens.peek(), Some(Ok(Token::Word(w))) if w == word) {
+            self.tokens.next();
             true
         } else {
             false
@@ -181,8 +187,8 @@ impl Parser {
         }
     }
     fn symbol(&mut self, ch: char) -> bool {
-        if matches!(self.tokens.get(self.pos),Some(Token::Symbol(c)) if *c==ch) {
-            self.pos += 1;
+        if matches!(self.tokens.peek(), Some(Ok(Token::Symbol(c))) if *c == ch) {
+            self.tokens.next();
             true
         } else {
             false
@@ -196,13 +202,17 @@ impl Parser {
         }
     }
     fn take(&mut self) -> Result<Token> {
-        let value = self
-            .tokens
-            .get(self.pos)
-            .cloned()
-            .ok_or_else(|| syntax("unexpected end of SQL"))?;
-        self.pos += 1;
-        Ok(value)
+        self.tokens
+            .next()
+            .ok_or_else(|| syntax("unexpected end of SQL"))?
+    }
+    fn finish(&mut self) -> Result<()> {
+        self.symbol(';');
+        match self.tokens.next() {
+            None => Ok(()),
+            Some(Err(error)) => Err(error),
+            Some(Ok(_)) => Err(syntax("trailing or unsupported SQL")),
+        }
     }
     fn identifier(&mut self) -> Result<String> {
         match self.take()? {
@@ -226,7 +236,7 @@ impl Parser {
     }
     fn expr(&mut self) -> Result<Expr> {
         let is_distance =
-            matches!(self.tokens.get(self.pos), Some(Token::Word(w)) if w == "l2_distance");
+            matches!(self.tokens.peek(), Some(Ok(Token::Word(w))) if w == "l2_distance");
         let name = self.identifier()?;
         if is_distance && self.symbol('(') {
             let col = self.identifier()?;
@@ -263,7 +273,7 @@ impl Parser {
         }
         Ok(result)
     }
-    fn statement(&mut self) -> Result<Statement> {
+    fn statement(&mut self) -> Result<Statement<'a>> {
         if self.word("begin") {
             self.word("transaction");
             return Ok(Statement::Begin);
@@ -354,39 +364,6 @@ impl Parser {
                 indexes: Vec::new(),
             }));
         }
-        if self.word("insert") {
-            self.expect("into")?;
-            let table = self.identifier()?;
-            let columns = if self.symbol('(') {
-                let mut names = vec![self.identifier()?];
-                while self.symbol(',') {
-                    names.push(self.identifier()?);
-                }
-                self.punctuation(')')?;
-                Some(names)
-            } else {
-                None
-            };
-            self.expect("values")?;
-            let mut rows = Vec::new();
-            loop {
-                self.punctuation('(')?;
-                let mut row = vec![self.literal()?];
-                while self.symbol(',') {
-                    row.push(self.literal()?);
-                }
-                self.punctuation(')')?;
-                rows.push(row);
-                if !self.symbol(',') {
-                    break;
-                }
-            }
-            return Ok(Statement::Insert {
-                table,
-                columns,
-                rows,
-            });
-        }
         if self.word("update") {
             let table = self.identifier()?;
             self.expect("set")?;
@@ -470,15 +447,86 @@ impl Parser {
     }
 }
 
-pub(crate) fn parse(input: &str) -> Result<Statement> {
-    let mut parser = Parser {
-        tokens: lex(input)?,
-        pos: 0,
-    };
-    let statement = parser.statement()?;
-    parser.symbol(';');
-    if parser.pos != parser.tokens.len() {
-        return Err(syntax("trailing or unsupported SQL"));
+#[derive(Debug)]
+pub(crate) struct InsertRows<'a> {
+    parser: Parser<'a>,
+    finished: bool,
+}
+
+impl InsertRows<'_> {
+    fn row(&mut self) -> Result<Vec<Literal>> {
+        self.parser.punctuation('(')?;
+        let mut row = vec![self.parser.literal()?];
+        while self.parser.symbol(',') {
+            row.push(self.parser.literal()?);
+        }
+        self.parser.punctuation(')')?;
+        if !self.parser.symbol(',') {
+            self.parser.finish()?;
+            self.finished = true;
+        }
+        Ok(row)
     }
+}
+
+impl Iterator for InsertRows<'_> {
+    type Item = Result<Vec<Literal>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        let row = self.row();
+        if row.is_err() {
+            self.finished = true;
+        }
+        Some(row)
+    }
+}
+
+pub(crate) fn parse(input: &str) -> Result<Statement<'_>> {
+    let mut parser = Parser {
+        tokens: Lexer { rest: input }.peekable(),
+    };
+    if parser.word("insert") {
+        parser.expect("into")?;
+        let table = parser.identifier()?;
+        let columns = if parser.symbol('(') {
+            let mut names = vec![parser.identifier()?];
+            while parser.symbol(',') {
+                names.push(parser.identifier()?);
+            }
+            parser.punctuation(')')?;
+            Some(names)
+        } else {
+            None
+        };
+        parser.expect("values")?;
+        return Ok(Statement::Insert {
+            table,
+            columns,
+            rows: InsertRows {
+                parser,
+                finished: false,
+            },
+        });
+    }
+    let statement = parser.statement()?;
+    parser.finish()?;
     Ok(statement)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_defers_row_syntax_until_iteration() {
+        // The parser hands the engine a bounded stream after the INSERT header.
+        // The engine must finish it before publishing the statement.
+        assert!(matches!(
+            parse("/* prefix */ INSERT INTO `T` (id,s) VALUES (1,'can''t'),(2,'unfinished"),
+            Ok(Statement::Insert { .. })
+        ));
+    }
 }

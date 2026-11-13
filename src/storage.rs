@@ -3,12 +3,15 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::rc::{Rc, Weak};
 
 use crate::commit_block::{self, Block, RestoredRow};
-use crate::disk_index::{DiskIndex, Entries, Entry};
+use crate::committed_cache::{self, CommittedCache, CommittedView};
+use crate::disk_index::Entry;
 use crate::position_index::{PositionBudget, PositionEntries, PositionIndex, PositionReader};
 use crate::read_batch::{OffsetBatch, WalRead};
 use crate::stage::{Budget, Reservation, Stage};
+use crate::stage_index::{StageEntries, StageIndex, StageLookup};
 use crate::types::{DataType, Schema, Value};
 use crate::vector_codec::{self, HEADER_BYTES, Header as PackedHeader};
 use crate::{Error, Result};
@@ -18,6 +21,10 @@ const HEADER: &[u8; 8] = b"MVTX0001";
 const COMMIT: &[u8; 8] = b"COMMIT01";
 const BLOCK_HEADER: &[u8; 8] = b"MVTX0002";
 const BLOCK_COMMIT: &[u8; 8] = b"COMMIT02";
+const ALIGNED_HEADER: &[u8; 8] = b"MVTX0003";
+const ALIGNED_COMMIT: &[u8; 8] = b"COMMIT03";
+const WAL_ALIGNMENT: u64 = 4096;
+static ZERO_PADDING: [u8; WAL_ALIGNMENT as usize] = [0; WAL_ALIGNMENT as usize];
 // Excludes the input, which is either an already charged stage or a separately
 // reserved disk read. Includes output, descriptors, dictionaries and stack scratch.
 const BLOCK_ENCODE_WORKSPACE: usize = 576 << 10;
@@ -30,6 +37,71 @@ fn checksum(mut hash: u64, buf: &[u8]) -> u64 {
 }
 fn corrupt(message: &str) -> Error {
     Error::new("storage_error", message)
+}
+
+#[derive(Clone, Copy)]
+enum CommitFormat {
+    Legacy,
+    Compact,
+    Aligned,
+}
+
+impl CommitFormat {
+    fn read(header: &[u8]) -> Result<Self> {
+        match header {
+            bytes if bytes == HEADER => Ok(Self::Legacy),
+            bytes if bytes == BLOCK_HEADER => Ok(Self::Compact),
+            bytes if bytes == ALIGNED_HEADER => Ok(Self::Aligned),
+            _ => Err(corrupt("invalid commit header")),
+        }
+    }
+
+    fn header(self) -> &'static [u8; 8] {
+        match self {
+            Self::Legacy => HEADER,
+            Self::Compact => BLOCK_HEADER,
+            Self::Aligned => ALIGNED_HEADER,
+        }
+    }
+
+    fn footer(self) -> &'static [u8; 8] {
+        match self {
+            Self::Legacy => COMMIT,
+            Self::Compact => BLOCK_COMMIT,
+            Self::Aligned => ALIGNED_COMMIT,
+        }
+    }
+
+    fn compact(self) -> bool {
+        matches!(self, Self::Compact | Self::Aligned)
+    }
+
+    // A version 3 frame is header, original compact payload, zero padding,
+    // then footer. The header length still counts only the original payload.
+    fn extent(self, start: u64, len: u64) -> Result<(u64, usize)> {
+        let end = start
+            .checked_add(32)
+            .and_then(|pos| pos.checked_add(len))
+            .ok_or_else(|| corrupt("commit length overflow"))?;
+        if matches!(self, Self::Aligned) {
+            let aligned = end
+                .checked_next_multiple_of(WAL_ALIGNMENT)
+                .ok_or_else(|| corrupt("aligned commit length overflow"))?;
+            Ok((aligned, (aligned - end) as usize))
+        } else {
+            Ok((end, 0))
+        }
+    }
+
+    fn for_compact(start: u64, len: u64) -> Result<Self> {
+        let (_, padding) = Self::Aligned.extent(start, len)?;
+        // Cap physical layout overhead for small or incompressible frames.
+        if padding != 0 && padding as u64 <= (len + 32) / 8 {
+            Ok(Self::Aligned)
+        } else {
+            Ok(Self::Compact)
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -501,7 +573,7 @@ fn decode_matching_row(data: &[u8], equalities: &[(usize, &Value)]) -> Result<Op
 pub(crate) struct Changes {
     pub catalog: Catalog,
     stage: Stage,
-    indexes: BTreeMap<String, DiskIndex>,
+    indexes: BTreeMap<String, StageIndex>,
     root: PathBuf,
 }
 impl Changes {
@@ -519,17 +591,20 @@ impl Changes {
                 self.catalog.insert(schema.name.clone(), schema.clone());
             }
             Op::Put { table, key, .. } | Op::Delete { table, key } => {
-                if !self.indexes.contains_key(table) {
-                    let path = self
-                        .root
-                        .with_extension(format!("{}.hash", self.indexes.len()));
-                    self.indexes.insert(table.clone(), DiskIndex::create(path)?);
-                }
-                self.indexes.get_mut(table).unwrap().put(Entry {
+                let entry = Entry {
                     key: *key,
                     offset,
                     deleted: matches!(op, Op::Delete { .. }),
-                })?;
+                };
+                if let Some(index) = self.indexes.get_mut(table) {
+                    index.put(entry)?;
+                } else {
+                    let path = self
+                        .root
+                        .with_extension(format!("{}.hash", self.indexes.len()));
+                    let index = StageIndex::new(path, entry, self.indexes.is_empty())?;
+                    self.indexes.insert(table.clone(), index);
+                }
             }
         }
         Ok(())
@@ -565,7 +640,9 @@ impl Changes {
 impl Drop for Changes {
     fn drop(&mut self) {
         for index in self.indexes.values() {
-            let _ = fs::remove_file(index.path());
+            if let Some(path) = index.path() {
+                let _ = fs::remove_file(path);
+            }
         }
     }
 }
@@ -575,12 +652,17 @@ pub(crate) struct Store {
     indexes: BTreeMap<String, PositionIndex>,
     vectors: BTreeMap<String, PositionIndex>,
     wal: File,
+    committed_end: u64,
+    synced_end: u64,
+    committed_cache: Option<Rc<CommittedCache>>,
+    cache_lease: Weak<CommittedCache>,
+    committed_limit: usize,
     path: PathBuf,
     scratch: PathBuf,
     sequence: u64,
     stage_budget: Budget,
     position_budget: PositionBudget,
-    _lock: File,
+    _lock: Rc<File>,
 }
 impl Store {
     pub fn open(data: &Path) -> Result<Self> {
@@ -624,17 +706,32 @@ impl Store {
             .unwrap_or(MAX_POSITION_BYTES)
             .min(MAX_POSITION_BYTES);
         let position_budget = PositionBudget::new(stage_budget.clone(), position_bytes);
+        let hot_bytes = std::env::var("MINIVECTORDB_HOT_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(8 << 20)
+            .min(8 << 20);
         let mut store = Self {
             catalog: Catalog::new(),
             indexes: BTreeMap::new(),
             vectors: BTreeMap::new(),
             wal,
+            committed_end: 0,
+            synced_end: 0,
+            committed_cache: None,
+            cache_lease: Weak::new(),
+            committed_limit: std::env::var("MINIVECTORDB_COMMITTED_BYTES")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(committed_cache::MAX_BYTES)
+                .min(committed_cache::MAX_BYTES)
+                .min(committed_cache::limit_for_hot_budget(hot_bytes)),
             path,
             scratch,
             sequence: 0,
             stage_budget,
             position_budget,
-            _lock: lock,
+            _lock: Rc::new(lock),
         };
         store.recover()?;
         Ok(store)
@@ -695,9 +792,9 @@ impl Store {
         // A flat index points directly into committed binary vector payloads.
         // It can be rebuilt from the same row versions as the primary index.
         let mut index = PositionIndex::create(self.temp("vectors"), self.position_budget.clone())?;
-        let mut log = WalRead::Direct(File::open(&self.path)?).buffered();
+        let mut log = self.wal_reader()?.buffered();
         let mut blocks = BlockReader::new(self.stage_budget.clone());
-        let mut slots = OffsetBatch::new(self.indexes[table].entries()?).ordered();
+        let mut slots = OffsetBatch::from_positions(self.indexes[table].entries()?).ordered();
         while let Some(slot) = slots.next() {
             let slot = slot?;
             if slot.deleted {
@@ -810,19 +907,13 @@ impl Store {
             reader.seek(SeekFrom::Start(pos))?;
             let mut header = [0; 16];
             reader.read_exact(&mut header)?;
-            let compact = match &header[..8] {
-                bytes if bytes == HEADER => false,
-                bytes if bytes == BLOCK_HEADER => true,
-                _ => return Err(corrupt("invalid commit header")),
-            };
+            let format = CommitFormat::read(&header[..8])?;
             let len = u64::from_le_bytes(header[8..16].try_into().unwrap());
-            let Some(end) = pos.checked_add(32).and_then(|p| p.checked_add(len)) else {
-                return Err(corrupt("commit length overflow"));
-            };
+            let (end, padding) = format.extent(pos, len)?;
             if end > size {
                 break;
             }
-            if compact && len > commit_block::MAX_INPUT_BYTES as u64 {
+            if format.compact() && len > commit_block::MAX_INPUT_BYTES as u64 {
                 return Err(corrupt("compact commit exceeds format limit"));
             }
             let mut left = len;
@@ -833,21 +924,27 @@ impl Store {
                 hash = checksum(hash, &buffer[..n]);
                 left -= u64::try_from(n).unwrap();
             }
+            reader.read_exact(&mut buffer[..padding])?;
+            if buffer[..padding].iter().any(|&byte| byte != 0) {
+                return Err(corrupt("nonzero aligned commit padding"));
+            }
             let mut footer = [0; 16];
             reader.read_exact(&mut footer)?;
-            let marker = if compact { BLOCK_COMMIT } else { COMMIT };
-            if &footer[..8] != marker || u64::from_le_bytes(footer[8..].try_into().unwrap()) != hash
+            if &footer[..8] != format.footer()
+                || u64::from_le_bytes(footer[8..].try_into().unwrap()) != hash
             {
                 return Err(corrupt("committed frame checksum mismatch"));
             }
-            self.replay(pos + 16, len, compact)?;
+            self.replay(pos + 16, len, format.compact())?;
             pos = end;
         }
         if pos != size {
             self.wal.set_len(pos)?;
             self.wal.sync_all()?;
+            self.synced_end = pos;
         }
         self.wal.seek(SeekFrom::End(0))?;
+        self.committed_end = pos;
         Ok(())
     }
     pub fn commit(&mut self, changes: &Changes) -> Result<()> {
@@ -855,6 +952,7 @@ impl Store {
         if len == 0 {
             return Ok(());
         }
+        self.discard_cached();
         let pos = self.wal.seek(SeekFrom::End(0))?;
         let staged = changes.stage.bytes();
         let positions = self.position_budget.lend_unused();
@@ -867,7 +965,7 @@ impl Store {
         } else {
             None
         };
-        let mut compact = false;
+        let mut format = CommitFormat::Legacy;
         let hash = if let Some(_reservation) = reservation {
             let disk_input;
             let input = if let Some(bytes) = staged {
@@ -881,11 +979,12 @@ impl Store {
             let payload = commit_block::pack_payload(input, |table| {
                 changes.catalog.get(table).map(|schema| schema.primary)
             })?;
-            compact = payload.is_some();
+            if let Some(payload) = &payload {
+                format = CommitFormat::for_compact(pos, payload.len() as u64)?;
+            }
             let payload = payload.as_deref().unwrap_or(input);
             len = payload.len() as u64;
-            self.wal
-                .write_all(if compact { BLOCK_HEADER } else { HEADER })?;
+            self.wal.write_all(format.header())?;
             self.wal.write_all(&len.to_le_bytes())?;
             self.wal.write_all(payload)?;
             checksum(FNV, payload)
@@ -911,12 +1010,80 @@ impl Store {
             }
         };
         drop(positions);
-        self.wal
-            .write_all(if compact { BLOCK_COMMIT } else { COMMIT })?;
+        let (end, padding) = format.extent(pos, len)?;
+        self.wal.write_all(&ZERO_PADDING[..padding])?;
+        self.wal.write_all(format.footer())?;
         self.wal.write_all(&hash.to_le_bytes())?;
         // This is the only commit acknowledgement gate. Derived indexes need no fsync.
         self.wal.sync_all()?;
-        self.replay(pos + 16, len, compact)
+        self.replay(pos + 16, len, format.compact())?;
+        self.committed_end = end;
+        self.synced_end = end;
+        Ok(())
+    }
+
+    /// Only one cache generation may consume budget, including detached readers.
+    pub fn prepare_cached(&mut self) -> Result<Option<CommittedView>> {
+        if self.committed_cache.is_none() && self.cache_lease.strong_count() == 0 {
+            self.committed_cache =
+                CommittedCache::refresh(None, &self.wal, self.committed_end, self.committed_limit)?;
+            if let Some(cache) = &self.committed_cache {
+                self.cache_lease = Rc::downgrade(cache);
+            }
+        }
+        Ok(self.cached_committed())
+    }
+
+    pub fn discard_cached(&mut self) {
+        self.committed_cache = None;
+    }
+
+    pub fn release_cached_pages(&self) {
+        if self.committed_cache.is_some() {
+            committed_cache::release_file_pages(&self.wal, self.committed_end);
+        }
+    }
+
+    pub fn committed_len(&self) -> u64 {
+        self.committed_end
+    }
+
+    pub fn committed_pages_synced(&self) -> bool {
+        // A complete frame recovered after an unacknowledged commit might
+        // still be dirty. Do not assume it was synced by the prior process.
+        self.synced_end == self.committed_end
+    }
+
+    /// Convert an index location to the earliest physical byte a row needs.
+    pub fn committed_row_start(offset: u64) -> u64 {
+        BlockPosition::unpack(offset).map_or(offset, |block| block.start)
+    }
+
+    /// Hot construction only visits committed rows, after the WAL has synced.
+    /// Advice cannot extend into a partial or uncommitted tail.
+    pub fn release_consumed_pages(&self, start: u64, end: u64) {
+        committed_cache::release_file_range(
+            &self.wal,
+            start,
+            end.min(self.committed_end).min(self.synced_end),
+        );
+    }
+
+    fn wal_reader(&self) -> Result<WalRead> {
+        Ok(match &self.committed_cache {
+            Some(cache) => WalRead::cached(File::open(&self.path)?, CommittedCache::view(cache)),
+            None => WalRead::Direct(File::open(&self.path)?),
+        })
+    }
+
+    pub fn cached_bytes(&self) -> usize {
+        self.cache_lease
+            .upgrade()
+            .map_or(0, |cache| cache.allocated())
+    }
+
+    pub fn cached_committed(&self) -> Option<CommittedView> {
+        self.committed_cache.as_ref().map(CommittedCache::view)
     }
 
     pub fn view(&self, table: &str, transaction: Option<&Changes>) -> Result<View> {
@@ -926,11 +1093,11 @@ impl Store {
             base: committed
                 .map(PositionIndex::entries)
                 .transpose()?
-                .map(OffsetBatch::new),
+                .map(OffsetBatch::from_positions),
             base_lookup: committed.map(PositionIndex::reader).transpose()?,
-            overlay: overlay.map(DiskIndex::reader).transpose()?,
-            extra: overlay.map(DiskIndex::entries).transpose()?,
-            wal: WalRead::Direct(File::open(&self.path)?),
+            overlay: overlay.map(StageIndex::reader).transpose()?,
+            extra: overlay.map(StageIndex::entries).transpose()?,
+            wal: self.wal_reader()?,
             blocks: BlockReader::new(self.stage_budget.clone()),
             staged: transaction
                 .map(|tx| tx.stage.reader().map(WalRead::Stage))
@@ -946,8 +1113,8 @@ impl Store {
             .get(&schema.name)
             .ok_or_else(|| corrupt("vector index missing"))?;
         Ok(VectorView {
-            slots: OffsetBatch::new(index.entries()?),
-            log: WalRead::Direct(File::open(&self.path)?),
+            slots: OffsetBatch::from_positions(index.entries()?),
+            log: self.wal_reader()?,
             dim,
             buffer: Vec::new(),
         })
@@ -1025,8 +1192,8 @@ impl Iterator for VectorView {
 pub(crate) struct View {
     base: Option<OffsetBatch<PositionEntries>>,
     base_lookup: Option<PositionReader>,
-    overlay: Option<DiskIndex>,
-    extra: Option<Entries>,
+    overlay: Option<StageLookup>,
+    extra: Option<StageEntries>,
     wal: WalRead,
     blocks: BlockReader,
     staged: Option<WalRead>,
@@ -1058,6 +1225,12 @@ pub(crate) enum HotRead<'a> {
 pub(crate) struct RowFields<'a> {
     bytes: &'a [u8],
     count: u32,
+    address: FieldAddress,
+}
+
+enum FieldAddress {
+    Contiguous(u64),
+    Block(Option<u64>),
 }
 
 impl<'a> RowFields<'a> {
@@ -1065,8 +1238,23 @@ impl<'a> RowFields<'a> {
         self.count as usize
     }
 
-    pub fn next_field(&mut self) -> Result<Field<'a>> {
-        read_field(&mut self.bytes)
+    pub fn next_field(&mut self) -> Result<(Field<'a>, Option<u64>)> {
+        let remaining = self.bytes.len();
+        let field = read_field(&mut self.bytes)?;
+        let offset = match &mut self.address {
+            FieldAddress::Contiguous(next) => {
+                let offset = *next;
+                *next += (remaining - self.bytes.len()) as u64;
+                Some(offset)
+            }
+            FieldAddress::Block(vector) => *vector,
+        };
+        let vector_offset = if matches!(field, Field::Vector(_)) {
+            offset
+        } else {
+            None
+        };
+        Ok((field, vector_offset))
     }
 }
 
@@ -1125,9 +1313,12 @@ impl View {
         let Position::Committed(offset) = position else {
             return Err(corrupt("hot scan requires committed positions"));
         };
-        let body = if let Some(location) = BlockPosition::unpack(offset) {
+        let (body, block_address) = if let Some(location) = BlockPosition::unpack(offset) {
             let decoded = self.blocks.restore(&mut self.wal, location, buffer)?;
-            &buffer[..decoded.len]
+            (
+                &buffer[..decoded.len],
+                Some(FieldAddress::Block(location.vector_at(&decoded))),
+            )
         } else {
             let reader = self.seek_row(position)?;
             let mut len = [0; 4];
@@ -1136,7 +1327,7 @@ impl View {
                 return Ok(HotRead::TooLarge);
             };
             reader.read_exact(body)?;
-            body
+            (&*body, None)
         };
         let mut bytes = body
             .strip_prefix(&[1])
@@ -1148,7 +1339,13 @@ impl View {
         Ok(HotRead::Row {
             key,
             offset,
-            fields: RowFields { bytes, count },
+            fields: RowFields {
+                bytes,
+                count,
+                address: block_address.unwrap_or_else(|| {
+                    FieldAddress::Contiguous(offset + 4 + (body.len() - bytes.len()) as u64)
+                }),
+            },
         })
     }
 
@@ -1242,6 +1439,241 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consecutive_staged_rows_stay_inline_then_keep_offsets_on_fallback() {
+        let path = std::env::temp_dir().join(format!(
+            "mv-stage-run-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut store = Store::open(&path).unwrap();
+        let mut changes = store.changes(store.catalog.clone()).unwrap();
+        let put = |key, text: &str| Op::Put {
+            table: "t".into(),
+            key,
+            row: vec![Value::Int(key), Value::Text(text.into())],
+        };
+        for key in -3..=3 {
+            changes.push(put(key, "aa")).unwrap();
+        }
+        let has_slots = || {
+            std::fs::read_dir(path.join("scratch"))
+                .unwrap()
+                .any(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".hash")
+                })
+        };
+        assert!(
+            !has_slots(),
+            "consecutive rows should not create temporary slots"
+        );
+        let first = changes.get("t", -3).unwrap().unwrap();
+        let last = changes.get("t", 3).unwrap().unwrap();
+        let view = store.view("t", Some(&changes)).unwrap();
+        assert_eq!(view.count(), 7);
+        changes.push(put(1, "changed")).unwrap();
+        assert!(
+            has_slots(),
+            "upsert must materialize all previous positions"
+        );
+        assert_eq!(changes.get("t", -3).unwrap().unwrap().offset, first.offset);
+        assert_eq!(changes.get("t", 3).unwrap().unwrap().offset, last.offset);
+        changes
+            .push(Op::Delete {
+                table: "t".into(),
+                key: 2,
+            })
+            .unwrap();
+        let mut rows: Vec<_> = store
+            .view("t", Some(&changes))
+            .unwrap()
+            .map(|row| row.unwrap().key)
+            .collect();
+        rows.sort_unstable();
+        assert_eq!(rows, [-3, -2, -1, 0, 1, 3]);
+        drop(changes);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn aligned_commit_restarts_with_old_frames_and_discards_a_torn_footer() {
+        let path = std::env::temp_dir().join(format!(
+            "mv-aligned-frame-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut store = Store::open(&path).unwrap();
+        let mut schema = store.changes(store.catalog.clone()).unwrap();
+        schema
+            .push(Op::Schema(Schema {
+                name: "t".into(),
+                primary: 0,
+                columns: vec![
+                    crate::types::Column {
+                        name: "id".into(),
+                        kind: DataType::Bigint,
+                        primary: true,
+                    },
+                    crate::types::Column {
+                        name: "body".into(),
+                        kind: DataType::Varchar(300),
+                        primary: false,
+                    },
+                ],
+                indexes: vec![],
+            }))
+            .unwrap();
+        store.commit(&schema).unwrap();
+        drop(schema);
+        let mut small = store.changes(store.catalog.clone()).unwrap();
+        for key in [0, 1] {
+            small
+                .push(Op::Put {
+                    table: "t".into(),
+                    key,
+                    row: vec![Value::Int(key), Value::Text("tiny".into())],
+                })
+                .unwrap();
+        }
+        store.commit(&small).unwrap();
+        drop(small);
+        let path_wal = path.join("commits.mv1");
+        let prefix = std::fs::read(&path_wal).unwrap();
+        assert!(prefix.starts_with(b"MVTX0001"));
+        assert!(prefix.windows(8).any(|bytes| bytes == b"MVTX0002"));
+        let mut wide = store.changes(store.catalog.clone()).unwrap();
+        let mut rng = 43_u32;
+        for key in 2..130 {
+            let body: String = (0..300)
+                .map(|_| {
+                    rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    char::from(b'a' + ((rng >> 16) % 26) as u8)
+                })
+                .collect();
+            wide.push(Op::Put {
+                table: "t".into(),
+                key,
+                row: vec![Value::Int(key), Value::Text(body)],
+            })
+            .unwrap();
+        }
+        store.commit(&wide).unwrap();
+        drop(wide);
+        drop(store);
+        let full = std::fs::read(&path_wal).unwrap();
+        assert_eq!(&full[..prefix.len()], &prefix);
+        assert_eq!(&full[prefix.len()..prefix.len() + 8], b"MVTX0003");
+        assert_eq!(full.len() % 4096, 0);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .view("t", None)
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .len(),
+            130
+        );
+        drop(store);
+        OpenOptions::new()
+            .write(true)
+            .open(&path_wal)
+            .unwrap()
+            .set_len((full.len() - 1) as u64)
+            .unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .view("t", None)
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(std::fs::read(&path_wal).unwrap(), prefix);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn writes_and_recovery_do_not_materialize_a_query_cache() {
+        let path = std::env::temp_dir().join(format!(
+            "mv-lazy-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut store = Store::open(&path).unwrap();
+        assert!(store.cached_committed().is_none());
+        let mut changes = store.changes(store.catalog.clone()).unwrap();
+        changes
+            .push(Op::Schema(Schema {
+                name: "t".into(),
+                primary: 0,
+                columns: vec![crate::types::Column {
+                    name: "id".into(),
+                    kind: DataType::Bigint,
+                    primary: true,
+                }],
+                indexes: vec![],
+            }))
+            .unwrap();
+        changes
+            .push(Op::Put {
+                table: "t".into(),
+                key: 7,
+                row: vec![Value::Int(7)],
+            })
+            .unwrap();
+        store.commit(&changes).unwrap();
+        assert!(store.cached_committed().is_none());
+        drop(changes);
+        let old = store.prepare_cached().unwrap().unwrap();
+        let original_len = old.bytes().len();
+        let mut changes = store.changes(store.catalog.clone()).unwrap();
+        changes
+            .push(Op::Put {
+                table: "t".into(),
+                key: 8,
+                row: vec![Value::Int(8)],
+            })
+            .unwrap();
+        store.commit(&changes).unwrap();
+        assert!(store.cached_committed().is_none());
+        assert!(
+            store.prepare_cached().unwrap().is_none(),
+            "a detached old reader must prevent a second allocation"
+        );
+        assert!(store.cached_bytes() > original_len);
+        assert_eq!(old.bytes().len(), original_len);
+        drop(old);
+        assert!(store.prepare_cached().unwrap().unwrap().bytes().len() > original_len);
+        drop(changes);
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert!(store.cached_committed().is_none());
+        assert_eq!(
+            store.view("t", None).unwrap().next().unwrap().unwrap().key,
+            7
+        );
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     #[test]
     fn encodes_losslessly_and_keeps_raw_fallback_compatible() {

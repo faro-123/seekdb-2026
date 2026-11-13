@@ -672,7 +672,7 @@ impl<W: Write> RowWriter<W> {
 fn try_hot(
     plan: &Plan,
     schema: &Schema,
-    store: &Store,
+    store: &mut Store,
     cache: &mut HotCache,
     writer: &mut RowWriter<impl Write>,
 ) -> Result<bool> {
@@ -696,20 +696,30 @@ fn try_hot(
             count += 1;
         }
     }
-    let Some(table) = cache.get(store, schema, *embedding, &fields[..count])? else {
+    let Some(table) = cache.get(store, schema, *embedding, &fields[..count], Some(q))? else {
         return Ok(false);
     };
-    let hits = table.select(q, k, |slot| plan.predicates.matches_hot(table, slot));
-    let covered = plan.projections.iter().all(|expr| {
-        let column = expr.column_index();
-        column == schema.primary || column == *embedding
-    });
+    let hits = match plan.predicates.0.as_slice() {
+        [] => table.select(q, k, |_| true)?,
+        [(column, op, wanted)] if *column != schema.primary && op == "=" => {
+            match table.select_equal(q, k, *column, wanted) {
+                Some(hits) => hits,
+                None => table.select(q, k, |slot| plan.predicates.matches_hot(table, slot))?,
+            }
+        }
+        _ => table.select(q, k, |slot| plan.predicates.matches_hot(table, slot))?,
+    };
+    let covered = plan
+        .projections
+        .iter()
+        .all(|expr| table.covers(expr.column_index()));
     let mut source = if covered || hits.is_empty() {
         None
     } else {
         Some(store.view(&schema.name, None)?)
     };
     let mut expanded = Vec::new();
+    let mut text_scratch = Vec::new();
     for hit in hits {
         let row = table.row(hit.slot);
         if let Some(source) = &mut source {
@@ -721,14 +731,17 @@ fn try_hot(
                     BoundExpr::Column(i) if *i == schema.primary => {
                         serde_json::to_writer(out, &row.key)?;
                     }
-                    BoundExpr::Column(_) => {
-                        Value::write_vector_json(table.vector(hit.slot, &mut expanded), out)?
+                    BoundExpr::Column(i) if i == embedding => {
+                        Value::write_vector_json(table.vector(hit.slot, &mut expanded)?, out)?
+                    }
+                    BoundExpr::Column(i) => {
+                        table.write_scalar(hit.slot, *i, out, &mut text_scratch)?
                     }
                     BoundExpr::Distance(_, query) => {
                         let distance = if query == q {
                             hit.distance()
                         } else {
-                            SquaredL2::between(table.vector(hit.slot, &mut expanded), query)
+                            SquaredL2::between(table.vector(hit.slot, &mut expanded)?, query)
                                 .distance()
                         };
                         serde_json::to_writer(out, &distance)?;

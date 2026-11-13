@@ -22,6 +22,10 @@ pub(crate) struct Header {
 }
 
 impl Header {
+    pub fn components(self) -> (i16, u8, i32) {
+        (self.exponent, self.width, self.base)
+    }
+
     pub fn parse(bytes: &[u8; HEADER_BYTES]) -> Self {
         Self {
             exponent: i16::from_le_bytes([bytes[0], bytes[1]]),

@@ -49,10 +49,9 @@ impl Engine {
         self.transaction = None;
     }
     fn commit(&mut self, changes: &Changes) -> Result<()> {
-        self.store.commit(changes)?;
-        // A successful replay can replace a WAL position or the table layout.
+        // Release any borrowed WAL prefix before appending committed bytes.
         self.hot.invalidate();
-        Ok(())
+        self.store.commit(changes)
     }
     pub fn execute(&mut self, input: &str) -> Result<Outcome> {
         let statement = sql::parse(input)?;
@@ -150,6 +149,7 @@ impl Engine {
                 };
                 let mut count = 0;
                 for literals in rows {
+                    let literals = literals?;
                     if literals.len() != mapping.len() {
                         return Err(Error::new(
                             "column_count",

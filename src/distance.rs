@@ -37,6 +37,14 @@ impl SquaredL2 {
         out.write_all(&bytes)
     }
 
+    pub fn from_scaled_sum(sum: u64, exponent: i16) -> Self {
+        // Convert an exact sum in squared dyadic units to units of 2^-298.
+        debug_assert!((-149..=116).contains(&exponent));
+        let mut result = Self([0; 10]);
+        result.apply(sum, 2 * (i32::from(exponent) + 149) as usize, false);
+        result
+    }
+
     pub fn between(row: &[f32], query: &[f32]) -> Self {
         let mut sum = Self([0; 10]);
         for (&a, &b) in row.iter().zip(query) {
