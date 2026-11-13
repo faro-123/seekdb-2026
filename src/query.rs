@@ -798,10 +798,19 @@ pub(crate) fn execute(
             .order
             .iter()
             .any(|(expr, _)| matches!(expr, BoundExpr::Distance(..)));
-    let mut view = if let Some(embedding) = plan
+    let covering = plan
         .covered_vector(schema)
-        .filter(|_| transaction.is_none())
-    {
+        .filter(|_| transaction.is_none());
+    let mut view = if plan.order.is_empty() && plan.limit.is_some() {
+        Scan::Table {
+            source: Box::new(store.unordered_limit_view(
+                &schema.name,
+                transaction,
+                covering.is_some(),
+            )?),
+            filter: plan.table_filter(),
+        }
+    } else if let Some(embedding) = covering {
         let source = store.vector_view(schema, embedding)?;
         Scan::Vector {
             source: if batch_reads {

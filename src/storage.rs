@@ -7,7 +7,7 @@ use std::rc::{Rc, Weak};
 
 use crate::commit_block::{self, Block, RestoredRow};
 use crate::committed_cache::{self, CommittedCache, CommittedView};
-use crate::disk_index::Entry;
+use crate::disk_index::{DiskIndex, Entry};
 use crate::position_index::{PositionBudget, PositionEntries, PositionIndex, PositionReader};
 use crate::read_batch::{OffsetBatch, WalRead};
 use crate::stage::{Budget, Reservation, Stage};
@@ -684,9 +684,19 @@ impl Store {
         // scratch is derived state exclusively owned by this format, never user data.
         for file in fs::read_dir(&scratch)? {
             let file = file?;
-            if file.file_name().to_string_lossy().starts_with("mv-") && file.file_type()?.is_file()
-            {
+            let name = file.file_name();
+            let name = name.to_string_lossy();
+            let kind = file.file_type()?;
+            if name.starts_with("mv-") && kind.is_file() {
                 fs::remove_file(file.path())?;
+            } else if kind.is_dir()
+                && let Some(sequence) = name
+                    .strip_prefix("mv-")
+                    .and_then(|name| name.strip_suffix(".limit"))
+                && sequence.parse::<u64>().is_ok()
+            {
+                // An interrupted query can leave its own derived indexes behind.
+                fs::remove_dir_all(file.path())?;
             }
         }
         let path = data.join("commits.mv1");
@@ -703,7 +713,7 @@ impl Store {
         let position_bytes = std::env::var("MINIVECTORDB_POSITION_BYTES")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(0)
+            .unwrap_or(MAX_POSITION_BYTES)
             .min(MAX_POSITION_BYTES);
         let position_budget = PositionBudget::new(stage_budget.clone(), position_bytes);
         let hot_bytes = std::env::var("MINIVECTORDB_HOT_BYTES")
@@ -1102,8 +1112,145 @@ impl Store {
             staged: transaction
                 .map(|tx| tx.stage.reader().map(WalRead::Stage))
                 .transpose()?,
+            _limit_files: None,
         })
     }
+
+    pub fn unordered_limit_view(
+        &mut self,
+        table: &str,
+        transaction: Option<&Changes>,
+        covering: bool,
+    ) -> Result<View> {
+        let path = self.temp("limit");
+        fs::create_dir(&path)?;
+        let files = LimitFiles(path);
+        let mut view = self.view(table, transaction)?;
+        if self.indexes.contains_key(table) {
+            let index = self.limit_index(table, covering, &files)?;
+            view.base = Some(OffsetBatch::from_positions(PositionEntries::from_disk(
+                &index,
+            )?));
+        }
+        if let Some(index) = transaction.and_then(|tx| tx.indexes.get(table)) {
+            view.extra = Some(index.legacy_entries(files.0.join("stage.hash"))?);
+        }
+        view._limit_files = Some(files);
+        Ok(view)
+    }
+
+    // Recreate the old hash insertion order from the authoritative history.
+    // Iterating the current live keys would lose collision, resize and tombstone order.
+    fn limit_index(&self, table: &str, covering: bool, files: &LimitFiles) -> Result<DiskIndex> {
+        let mut primary = DiskIndex::create(files.0.join("primary.hash"))?;
+        let mut vector = None;
+        let mut reader = BufReader::new(File::open(&self.path)?);
+        let mut frame = 0;
+        let mut block_bytes = Vec::new();
+        let mut expanded = Vec::new();
+        let mut table_bytes = vec![0; table.len()];
+        while frame < self.committed_end {
+            reader.seek(SeekFrom::Start(frame))?;
+            let mut header = [0; 8];
+            reader.read_exact(&mut header)?;
+            let format = CommitFormat::read(&header)?;
+            let mut size = [0; 8];
+            reader.read_exact(&mut size)?;
+            let size = u64::from_le_bytes(size);
+            let (end, _) = format.extent(frame, size)?;
+            if end > self.committed_end {
+                return Err(corrupt("limit scan crosses committed WAL"));
+            }
+            let mut offset = frame + 16;
+            let payload_end = offset + size;
+            while offset < payload_end {
+                if payload_end - offset < 4 {
+                    return Err(corrupt("truncated record during limit scan"));
+                }
+                reader.seek(SeekFrom::Start(offset))?;
+                let size = u64::from(u32read(&mut reader)?);
+                if size == 0 || size > payload_end - offset - 4 {
+                    return Err(corrupt("invalid record during limit scan"));
+                }
+                let next = offset + 4 + size;
+                let mut tag = [0];
+                reader.read_exact(&mut tag)?;
+                match tag[0] {
+                    0 if covering && vector.is_none() => {
+                        let schema: Schema = serde_json::from_reader((&mut reader).take(size - 1))?;
+                        if schema.name == table && !schema.indexes.is_empty() {
+                            let mut index = DiskIndex::create(files.0.join("vector.hash"))?;
+                            for entry in primary.entries()? {
+                                let entry = entry?;
+                                if !entry.deleted {
+                                    index.put(entry)?;
+                                }
+                            }
+                            vector = Some(index);
+                        }
+                    }
+                    0 => {}
+                    1 | 2 => {
+                        if size < 13 {
+                            return Err(corrupt("invalid table name during limit scan"));
+                        }
+                        let name_size = u64::from(u32read(&mut reader)?);
+                        if name_size > size - 13 {
+                            return Err(corrupt("invalid table name during limit scan"));
+                        }
+                        if name_size == table.len() as u64 {
+                            reader.read_exact(&mut table_bytes)?;
+                            if table_bytes == table.as_bytes() {
+                                let entry = Entry {
+                                    key: i64read(&mut reader)?,
+                                    offset,
+                                    deleted: tag[0] == 2,
+                                };
+                                primary.put(entry)?;
+                                if let Some(index) = &mut vector {
+                                    index.put(entry)?;
+                                }
+                            }
+                        }
+                    }
+                    commit_block::TAG if format.compact() => {
+                        if size > commit_block::TARGET_BYTES as u64 {
+                            return Err(corrupt("compact block exceeds limit scan workspace"));
+                        }
+                        block_bytes.resize(size as usize, 0);
+                        block_bytes[0] = tag[0];
+                        reader.read_exact(&mut block_bytes[1..])?;
+                        let block = Block::parse(&block_bytes)?;
+                        if block.table()? == table {
+                            expanded.resize(commit_block::TARGET_BYTES, 0);
+                            for row in 0..block.len() {
+                                let restored = block.restore(row, &mut expanded)?;
+                                let (_, key, _) = put_header(&mut &expanded[1..restored.len])?;
+                                let entry = Entry {
+                                    key,
+                                    offset: BlockPosition { start: offset, row }.pack()?,
+                                    deleted: false,
+                                };
+                                primary.put(entry)?;
+                                if let Some(index) = &mut vector {
+                                    index.put(entry)?;
+                                }
+                            }
+                        }
+                    }
+                    _ => return Err(corrupt("invalid operation during limit scan")),
+                }
+                offset = next;
+            }
+            frame = end;
+        }
+        if covering {
+            vector.ok_or_else(|| corrupt("covering limit index missing"))
+        } else {
+            Ok(primary)
+        }
+    }
+
     pub fn vector_view(&self, schema: &Schema, column: usize) -> Result<VectorView> {
         let DataType::Vector(dim) = schema.columns[column].kind else {
             return Err(corrupt("vector index does not refer to a vector column"));
@@ -1197,6 +1344,15 @@ pub(crate) struct View {
     wal: WalRead,
     blocks: BlockReader,
     staged: Option<WalRead>,
+    _limit_files: Option<LimitFiles>,
+}
+
+struct LimitFiles(PathBuf);
+
+impl Drop for LimitFiles {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

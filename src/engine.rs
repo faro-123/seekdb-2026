@@ -127,54 +127,66 @@ impl Engine {
             Statement::Insert {
                 table,
                 columns,
-                rows,
+                mut rows,
             } => {
-                let schema = self.schema(&table)?;
-                let mapping = if let Some(cols) = columns {
-                    let ids: Vec<_> = cols
-                        .iter()
-                        .map(|n| schema.column(n))
-                        .collect::<Result<_>>()?;
-                    if ids.len() != schema.columns.len()
-                        || ids.iter().copied().collect::<BTreeSet<_>>().len() != ids.len()
-                    {
-                        return Err(Error::new(
-                            "column_count",
-                            "all columns exactly once required",
-                        ));
+                let result = (|| {
+                    let schema = self.schema(&table)?;
+                    let mapping = if let Some(cols) = columns {
+                        let ids: Vec<_> = cols
+                            .iter()
+                            .map(|n| schema.column(n))
+                            .collect::<Result<_>>()?;
+                        if ids.len() != schema.columns.len()
+                            || ids.iter().copied().collect::<BTreeSet<_>>().len() != ids.len()
+                        {
+                            return Err(Error::new(
+                                "column_count",
+                                "all columns exactly once required",
+                            ));
+                        }
+                        ids
+                    } else {
+                        (0..schema.columns.len()).collect()
+                    };
+                    let mut count = 0;
+                    for literals in rows.by_ref() {
+                        let literals = literals?;
+                        if literals.len() != mapping.len() {
+                            return Err(Error::new(
+                                "column_count",
+                                "value count differs from column count",
+                            ));
+                        }
+                        let mut row = Vec::with_capacity(schema.columns.len());
+                        for (i, col) in schema.columns.iter().enumerate() {
+                            let source = mapping.iter().position(|n| *n == i).unwrap();
+                            row.push(coerce(&literals[source], &col.kind)?);
+                        }
+                        let key = row[schema.primary].int()?;
+                        if self.exists(&table, key)?
+                            || changes.get(&table, key)?.is_some_and(|e| !e.deleted)
+                        {
+                            return Err(Error::new("duplicate_key", "duplicate primary key"));
+                        }
+                        changes.push(Op::Put {
+                            table: table.clone(),
+                            key,
+                            row,
+                        })?;
+                        count += 1;
                     }
-                    ids
-                } else {
-                    (0..schema.columns.len()).collect()
-                };
-                let mut count = 0;
-                for literals in rows {
-                    let literals = literals?;
-                    if literals.len() != mapping.len() {
-                        return Err(Error::new(
-                            "column_count",
-                            "value count differs from column count",
-                        ));
+                    Ok(Outcome::Affected(count))
+                })();
+                if result.is_err() {
+                    // Syntax errors in the remainder outrank semantic errors.
+                    // The failed statement's staged rows are discarded.
+                    drop(changes);
+                    for row in rows {
+                        row?;
                     }
-                    let mut row = Vec::with_capacity(schema.columns.len());
-                    for (i, col) in schema.columns.iter().enumerate() {
-                        let source = mapping.iter().position(|n| *n == i).unwrap();
-                        row.push(coerce(&literals[source], &col.kind)?);
-                    }
-                    let key = row[schema.primary].int()?;
-                    if self.exists(&table, key)?
-                        || changes.get(&table, key)?.is_some_and(|e| !e.deleted)
-                    {
-                        return Err(Error::new("duplicate_key", "duplicate primary key"));
-                    }
-                    changes.push(Op::Put {
-                        table: table.clone(),
-                        key,
-                        row,
-                    })?;
-                    count += 1;
+                    return result;
                 }
-                Outcome::Affected(count)
+                result?
             }
             Statement::Update {
                 table,

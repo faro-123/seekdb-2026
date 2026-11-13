@@ -19,6 +19,56 @@ fn quoted_keywords_cannot_turn_unsupported_sql_into_delete() {
 }
 
 #[test]
+fn unordered_limit_preserves_legacy_rows_after_reopen() {
+    let data = Data::new();
+    let initial = session(
+        &data,
+        &[
+            "CREATE TABLE t (id BIGINT PRIMARY KEY, v VECTOR(1));".into(),
+            "INSERT INTO t VALUES (2,'[2]'),(1,'[1]');".into(),
+            "CREATE VECTOR INDEX vi ON t(v);".into(),
+            "SELECT id FROM t LIMIT 1;".into(),
+            "SELECT id,v FROM t LIMIT 1;".into(),
+            "SELECT id FROM t ORDER BY id LIMIT 1;".into(),
+        ],
+    );
+    assert_eq!(initial[3]["rows"], json!([[2]]));
+    assert_eq!(initial[4]["rows"], json!([[2, [2.0]]]));
+    assert_eq!(initial[5]["rows"], json!([[1]]));
+    let recovered = session(
+        &data,
+        &[
+            "SELECT id FROM t LIMIT 1;".into(),
+            "BEGIN;".into(),
+            "DELETE FROM t WHERE id=2;".into(),
+            "SELECT id FROM t LIMIT 1;".into(),
+            "ROLLBACK;".into(),
+            "SELECT id FROM t LIMIT 1;".into(),
+        ],
+    );
+    assert_eq!(recovered[0]["rows"], json!([[2]]));
+    assert_eq!(recovered[3]["rows"], json!([[1]]));
+    assert_eq!(recovered[5]["rows"], json!([[2]]));
+}
+
+#[test]
+fn malformed_insert_tail_takes_precedence_over_an_earlier_duplicate() {
+    let responses = run(&[
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, s VARCHAR(20));",
+        "INSERT INTO t VALUES (1,'existing');",
+        "BEGIN;",
+        "INSERT INTO t VALUES (2,'before');",
+        "INSERT INTO t VALUES (3,'temporary'),(1,'duplicate'),(4,'unclosed",
+        "SELECT id FROM t ORDER BY id;",
+        "COMMIT;",
+        "SELECT id FROM t ORDER BY id;",
+    ]);
+    assert_eq!(responses[4]["error"]["code"], "unsupported_sql");
+    assert_eq!(responses[5]["rows"], json!([[1], [2]]));
+    assert_eq!(responses[7]["rows"], json!([[1], [2]]));
+}
+
+#[test]
 fn exact_topk_resolves_distances_that_round_to_the_same_f64() {
     let responses = run(&[
         "CREATE TABLE t (id BIGINT PRIMARY KEY, v VECTOR(2));",

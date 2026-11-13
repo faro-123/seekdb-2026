@@ -505,6 +505,12 @@ pub(crate) struct PositionEntries {
 }
 
 impl PositionEntries {
+    pub fn from_disk(index: &DiskIndex) -> Result<Self> {
+        Ok(Self {
+            inner: Iter::Disk(index.entries()?),
+        })
+    }
+
     pub fn increasing_offsets(&self) -> bool {
         matches!(&self.inner, Iter::Resident(rows) if rows.rows.increasing_offsets)
     }

@@ -137,6 +137,17 @@ impl StageIndex {
         }
     }
 
+    pub(crate) fn legacy_entries(&self, path: PathBuf) -> Result<StageEntries> {
+        match self {
+            Self::Run { run, .. } => {
+                let disk =
+                    Self::materialize(path, (0..run.count).map(|ordinal| run.entry(ordinal)))?;
+                Ok(StageEntries::Disk(disk.entries()?))
+            }
+            Self::Disk(disk) => Ok(StageEntries::Disk(disk.entries()?)),
+        }
+    }
+
     pub(crate) fn path(&self) -> Option<&Path> {
         match self {
             Self::Run { .. } => None,
