@@ -125,6 +125,18 @@ impl HotText {
         scratch
     }
 
+    pub fn compare_slots(&self, left: usize, right: usize) -> Ordering {
+        // Both values have the same prefix and suffix. With fixed lengths,
+        // comparing the middles also gives the original byte ordering.
+        if self.stride.is_some() || self.suffix.is_empty() {
+            return self.middle(left).cmp(self.middle(right));
+        }
+        self.middle(left)
+            .iter()
+            .chain(self.suffix.iter())
+            .cmp(self.middle(right).iter().chain(self.suffix.iter()))
+    }
+
     pub fn compare(&self, slot: usize, mut wanted: &[u8]) -> Ordering {
         let middle = self.middle(slot);
         if self.prefix.is_empty() && self.suffix.is_empty() {

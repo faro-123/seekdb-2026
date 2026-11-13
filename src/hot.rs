@@ -23,6 +23,7 @@ const MAX_BYTES: usize = 8 << 20;
 const MAX_BODY: usize = 384 << 10;
 const MAX_COLUMNS: usize = 256;
 const RELEASE_BYTES: u64 = 64 << 10;
+const MAX_EQUALITY_GROUPS: usize = 64;
 pub(crate) const MAX_FIELDS: usize = 8;
 pub(crate) const MAX_K: usize = 1024;
 
@@ -36,9 +37,83 @@ enum Scalar {
     Text(HotText),
 }
 
+impl Scalar {
+    fn compare(&self, slot: usize, wanted: &Value) -> Ordering {
+        match (self, wanted) {
+            (Self::Int(values), Value::Int(n)) => values[slot].cmp(n),
+            (Self::Text(values), Value::Text(s)) => values.compare(slot, s.as_bytes()),
+            _ => unreachable!("typed scalar comparison"),
+        }
+    }
+
+    fn compare_slots(&self, left: u32, right: u32) -> Ordering {
+        let left = left as usize;
+        let right = right as usize;
+        match self {
+            Self::Int(values) => values[left].cmp(&values[right]),
+            Self::Text(values) => values.compare_slots(left, right),
+        }
+    }
+}
+
 struct HotColumn {
     index: usize,
     values: Scalar,
+}
+
+struct EqualitySlots {
+    column: usize,
+    slots: Vec<u32>,
+    starts: Vec<u32>,
+}
+
+impl EqualitySlots {
+    fn build(column: usize, values: &Scalar, rows: usize, free: usize) -> Option<Self> {
+        let end = u32::try_from(rows).ok()?;
+        let groups = rows.min(MAX_EQUALITY_GROUPS) + 1;
+        let bytes = rows
+            .checked_add(groups)?
+            .checked_mul(size_of::<u32>())?
+            .checked_add(size_of::<Self>())?;
+        if rows == 0 || bytes > free {
+            return None;
+        }
+        let mut slots: Vec<_> = (0..end).collect();
+        slots.sort_unstable_by(|&left, &right| {
+            values.compare_slots(left, right).then(left.cmp(&right))
+        });
+        let mut starts = Vec::with_capacity(groups);
+        starts.push(0);
+        for (i, pair) in slots.windows(2).enumerate() {
+            if values.compare_slots(pair[0], pair[1]) != Ordering::Equal {
+                if starts.len() == MAX_EQUALITY_GROUPS {
+                    return None;
+                }
+                starts.push((i + 1) as u32);
+            }
+        }
+        starts.push(end);
+        Some(Self {
+            column,
+            slots,
+            starts,
+        })
+    }
+
+    fn matching(&self, column: &Scalar, wanted: &Value) -> &[u32] {
+        let Ok(group) = self.starts[..self.starts.len() - 1]
+            .binary_search_by(|&start| column.compare(self.slots[start as usize] as usize, wanted))
+        else {
+            return &[];
+        };
+        &self.slots[self.starts[group] as usize..self.starts[group + 1] as usize]
+    }
+}
+
+enum EqualityCache {
+    Empty,
+    Denied,
+    Ready(Box<EqualitySlots>),
 }
 
 enum HotVector<'a> {
@@ -284,6 +359,8 @@ pub(crate) struct HotTable {
     vectors: SnapshotVectors,
     rows: Vec<HotRow>,
     columns: Vec<HotColumn>,
+    equality: EqualityCache,
+    free_bytes: usize,
 }
 
 #[derive(Eq, PartialEq, Ord, PartialOrd)]
@@ -392,11 +469,47 @@ impl HotTable {
             .iter()
             .find(|c| c.index == column)
             .expect("cached predicate");
-        match (&col.values, wanted) {
-            (Scalar::Int(values), Value::Int(n)) => values[slot].cmp(n),
-            (Scalar::Text(values), Value::Text(s)) => values.compare(slot, s.as_bytes()),
-            _ => unreachable!("typed scalar comparison"),
+        col.values.compare(slot, wanted)
+    }
+
+    pub fn select_equal(
+        &mut self,
+        q: &[f32],
+        k: usize,
+        column: usize,
+        wanted: &Value,
+    ) -> Option<Vec<Hit>> {
+        let SnapshotVectors::Integer(integer) = &self.vectors else {
+            return None;
+        };
+        let query = Kernel::query(q, integer.exponent).filter(|q| q.len() == self.dim)?;
+        if matches!(self.equality, EqualityCache::Empty) {
+            let index = self.columns.iter().position(|c| c.index == column)?;
+            self.equality = match EqualitySlots::build(
+                index,
+                &self.columns[index].values,
+                self.rows.len(),
+                self.free_bytes,
+            ) {
+                Some(slots) => EqualityCache::Ready(Box::new(slots)),
+                None => EqualityCache::Denied,
+            };
         }
+        let EqualityCache::Ready(groups) = &self.equality else {
+            return None;
+        };
+        let cached = &self.columns[groups.column];
+        if cached.index != column {
+            return None;
+        }
+        let slots = groups.matching(&cached.values, wanted);
+        Some(self.select_codes(
+            k,
+            integer.exponent,
+            slots.len(),
+            slots.iter().map(|&slot| slot as usize),
+            |slot| integer.squared(slot, &query),
+        ))
     }
 
     fn offer(&self, hits: &mut BinaryHeap<Hit>, k: usize, slot: usize, q: &[f32], vector: &[f32]) {
@@ -412,9 +525,13 @@ impl HotTable {
         if let SnapshotVectors::Integer(integer) = &self.vectors
             && let Some(query) = Kernel::query(q, integer.exponent).filter(|q| q.len() == self.dim)
         {
-            return Ok(self.select_codes(k, integer.exponent, &matches, |slot| {
-                integer.squared(slot, &query)
-            }));
+            return Ok(self.select_codes(
+                k,
+                integer.exponent,
+                self.rows.len(),
+                (0..self.rows.len()).filter(|&slot| matches(slot)),
+                |slot| integer.squared(slot, &query),
+            ));
         }
         if let Some(hits) = self.select_packed(q, k, &matches)? {
             return Ok(hits);
@@ -447,7 +564,8 @@ impl HotTable {
         Ok(Some(self.select_codes(
             k,
             packed.exponent,
-            matches,
+            self.rows.len(),
+            (0..self.rows.len()).filter(|&slot| matches(slot)),
             |slot| {
                 let location = &packed.locations[slot];
                 packed.kernel.distance(
@@ -464,14 +582,17 @@ impl HotTable {
         &self,
         k: usize,
         exponent: i16,
-        matches: impl Fn(usize) -> bool,
+        eligible: usize,
+        slots: impl Iterator<Item = usize>,
         squared_distance: impl Fn(usize) -> u64,
     ) -> Vec<Hit> {
-        let mut heap = BinaryHeap::with_capacity(k.min(self.rows.len()));
-        for (slot, row) in self.rows.iter().enumerate() {
-            if matches(slot) {
-                retain_smallest(&mut heap, k, (squared_distance(slot), row.key, slot));
-            }
+        let mut heap = BinaryHeap::with_capacity(k.min(eligible));
+        for slot in slots {
+            retain_smallest(
+                &mut heap,
+                k,
+                (squared_distance(slot), self.rows[slot].key, slot),
+            );
         }
         heap.into_sorted_vec()
             .into_iter()
@@ -739,6 +860,10 @@ impl HotTable {
                     },
                 })
                 .collect(),
+            equality: EqualityCache::Empty,
+            // This still includes the upper bound on text data and offsets
+            // computed before the snapshot's storage is allocated.
+            free_bytes: budget - bytes,
         };
         last_start = 0;
         let mut released = 0;
@@ -934,8 +1059,8 @@ impl HotCache {
         self.snapshot = Snapshot::Empty;
     }
 
-    fn table(&self) -> Option<&HotTable> {
-        match &self.snapshot {
+    fn table(&mut self) -> Option<&mut HotTable> {
+        match &mut self.snapshot {
             Snapshot::Ready(table) => Some(table),
             _ => None,
         }
@@ -948,7 +1073,7 @@ impl HotCache {
         vector: usize,
         fields: &[usize],
         query: Option<&[f32]>,
-    ) -> Result<Option<&HotTable>> {
+    ) -> Result<Option<&mut HotTable>> {
         if schema.name.len() > 4096 {
             return Ok(None);
         }
@@ -1210,6 +1335,43 @@ mod tests {
         drop(cache);
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn equality_groups_are_bounded_and_keep_original_slots() {
+        let column = Scalar::Int(vec![9, 3, 9, 2, 3, i64::MIN]);
+        let positions = EqualitySlots::build(0, &column, 6, 1024).unwrap();
+        assert_eq!(positions.matching(&column, &Value::Int(3)), &[1, 4]);
+        assert_eq!(positions.matching(&column, &Value::Int(9)), &[0, 2]);
+        assert_eq!(positions.matching(&column, &Value::Int(i64::MIN)), &[5]);
+        assert!(positions.matching(&column, &Value::Int(5)).is_empty());
+        assert!(EqualitySlots::build(0, &column, 6, 1).is_none());
+        let high = Scalar::Int((0..65).collect());
+        assert!(EqualitySlots::build(0, &high, 65, 4096).is_none());
+
+        let words = [
+            "共同前缀z共同后缀",
+            "共同前缀az共同后缀",
+            "共同前缀z共同后缀",
+        ];
+        let mut shape = TextShape::default();
+        for word in words {
+            shape.observe(word.as_bytes());
+        }
+        let mut text = shape.allocate(words.len(), words.iter().map(|word| word.len()).sum());
+        for (slot, word) in words.iter().enumerate() {
+            assert!(text.push(slot, word.as_bytes()));
+        }
+        let column = Scalar::Text(text);
+        let positions = EqualitySlots::build(1, &column, words.len(), 1024).unwrap();
+        assert_eq!(
+            positions.matching(&column, &Value::Text(words[0].into())),
+            &[0, 2]
+        );
+        assert_eq!(
+            positions.matching(&column, &Value::Text(words[1].into())),
+            &[1]
+        );
     }
 
     #[test]

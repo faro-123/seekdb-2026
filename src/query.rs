@@ -699,7 +699,16 @@ fn try_hot(
     let Some(table) = cache.get(store, schema, *embedding, &fields[..count], Some(q))? else {
         return Ok(false);
     };
-    let hits = table.select(q, k, |slot| plan.predicates.matches_hot(table, slot))?;
+    let hits = match plan.predicates.0.as_slice() {
+        [] => table.select(q, k, |_| true)?,
+        [(column, op, wanted)] if *column != schema.primary && op == "=" => {
+            match table.select_equal(q, k, *column, wanted) {
+                Some(hits) => hits,
+                None => table.select(q, k, |slot| plan.predicates.matches_hot(table, slot))?,
+            }
+        }
+        _ => table.select(q, k, |slot| plan.predicates.matches_hot(table, slot))?,
+    };
     let covered = plan
         .projections
         .iter()
