@@ -755,8 +755,6 @@ impl Store {
         self.scratch.join(format!("mv-{}.{suffix}", self.sequence))
     }
     pub fn changes(&mut self, catalog: Catalog) -> Result<Changes> {
-        // A statement may need the scratch space retained by derived indexes.
-        self.limit_indexes.clear();
         let root = self.temp("base");
         Ok(Changes::new(root, catalog, self.stage_budget.clone()))
     }
@@ -799,6 +797,20 @@ impl Store {
                         offset: vector,
                         deleted,
                     })?;
+                }
+                // Replay visits new committed operations in historical order.
+                // Both LIMIT variants hold row offsets (not vector offsets),
+                // preserving legacy collision, resize and tombstone ordering.
+                for cached in &mut self.limit_indexes {
+                    if cached.table == *table {
+                        let cached = Rc::get_mut(cached)
+                            .ok_or_else(|| corrupt("active limit reader during commit"))?;
+                        cached.index.put(Entry {
+                            key: *key,
+                            offset,
+                            deleted,
+                        })?;
+                    }
                 }
             }
         }
@@ -968,9 +980,11 @@ impl Store {
         if len == 0 {
             return Ok(());
         }
-        // Readers can outlive the cache entry, but new queries must rebuild
-        // after any attempted WAL mutation.
-        self.limit_indexes.clear();
+        // An outstanding reader owns the old generation. Detach it rather
+        // than modifying its slots; ordinary completed queries leave the
+        // cache uniquely owned and can advance incrementally below.
+        self.limit_indexes
+            .retain(|index| Rc::strong_count(index) == 1);
         self.discard_cached();
         let pos = self.wal.seek(SeekFrom::End(0))?;
         let staged = changes.stage.bytes();
@@ -1038,6 +1052,13 @@ impl Store {
         self.replay(pos + 16, len, format.compact())?;
         self.committed_end = end;
         self.synced_end = end;
+        for cached in &mut self.limit_indexes {
+            let cached =
+                Rc::get_mut(cached).ok_or_else(|| corrupt("active limit reader after commit"))?;
+            cached.committed_end = end;
+            cached.bytes = cached._files.bytes()?;
+        }
+        self.trim_limit_indexes();
         Ok(())
     }
 
@@ -1174,9 +1195,7 @@ impl Store {
         fs::create_dir(&path)?;
         let files = LimitFiles(path);
         let index = self.limit_index(table, covering, &files)?;
-        let bytes = fs::read_dir(&files.0)?.try_fold(0_u64, |total, file| {
-            Ok::<_, std::io::Error>(total.saturating_add(file?.metadata()?.len()))
-        })?;
+        let bytes = files.bytes()?;
         let cached = Rc::new(LimitIndex {
             table: table.to_owned(),
             covering,
@@ -1186,21 +1205,23 @@ impl Store {
             _files: files,
             _lock: Rc::clone(&self._lock),
         });
-        if bytes > LIMIT_CACHE_BYTES {
-            self.limit_indexes.clear();
-        } else {
-            while self.limit_indexes.len() >= LIMIT_CACHE_ENTRIES
+        self.limit_indexes.push_back(Rc::clone(&cached));
+        self.trim_limit_indexes();
+        Ok(cached)
+    }
+
+    fn trim_limit_indexes(&mut self) {
+        // Keep at most one oversized entry, including after incremental growth.
+        while self.limit_indexes.len() > 1
+            && (self.limit_indexes.len() > LIMIT_CACHE_ENTRIES
                 || self
                     .limit_indexes
                     .iter()
-                    .fold(bytes, |total, item| total.saturating_add(item.bytes))
-                    > LIMIT_CACHE_BYTES
-            {
-                self.limit_indexes.pop_front();
-            }
+                    .fold(0_u64, |total, item| total.saturating_add(item.bytes))
+                    > LIMIT_CACHE_BYTES)
+        {
+            self.limit_indexes.pop_front();
         }
-        self.limit_indexes.push_back(Rc::clone(&cached));
-        Ok(cached)
     }
 
     // Recreate the old hash insertion order from the authoritative history.
@@ -1423,6 +1444,14 @@ struct LimitIndex {
 }
 
 struct LimitFiles(PathBuf);
+
+impl LimitFiles {
+    fn bytes(&self) -> Result<u64> {
+        Ok(fs::read_dir(&self.0)?.try_fold(0_u64, |total, file| {
+            Ok::<_, std::io::Error>(total.saturating_add(file?.metadata()?.len()))
+        })?)
+    }
+}
 
 impl Drop for LimitFiles {
     fn drop(&mut self) {
@@ -1672,7 +1701,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unordered_limit_reuses_indexes_and_invalidates_on_write() {
+    fn unordered_limit_reuses_indexes_and_preserves_active_readers() {
         let path = std::env::temp_dir().join(format!(
             "mv-limit-cache-{}-{}",
             std::process::id(),
@@ -1730,6 +1759,32 @@ mod tests {
         assert_eq!(
             store.sequence, after_second_table,
             "switching tables discarded the cache"
+        );
+
+        // BEGIN/ROLLBACK and failed statements prepare then discard Changes.
+        let abandoned = store.changes(store.catalog.clone()).unwrap();
+        drop(abandoned);
+        let after_abandon = store.sequence;
+        assert_eq!(read(&mut store, "a"), [2, 1]);
+        assert_eq!(store.sequence, after_abandon, "empty staging rebuilt LIMIT");
+
+        // An acknowledged write should advance the existing indexes, including
+        // the generation of an untouched table, without replaying old history.
+        let mut committed = store.changes(store.catalog.clone()).unwrap();
+        committed
+            .push(Op::Delete {
+                table: "b".into(),
+                key: 2,
+            })
+            .unwrap();
+        store.commit(&committed).unwrap();
+        drop(committed);
+        let after_commit = store.sequence;
+        assert_eq!(read(&mut store, "b"), [1]);
+        assert_eq!(read(&mut store, "a"), [2, 1]);
+        assert_eq!(
+            store.sequence, after_commit,
+            "committed staging rebuilt LIMIT"
         );
 
         let mut active_reader = store.unordered_limit_view("a", None, false).unwrap();

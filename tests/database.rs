@@ -87,6 +87,63 @@ fn unordered_limit_cache_tracks_vector_index_and_transactions() {
 }
 
 #[test]
+fn incremental_limit_indexes_match_recovery_after_growth_and_tombstones() {
+    let data = Data::new();
+    let mut statements = vec![
+        "CREATE TABLE t (id BIGINT PRIMARY KEY, s VARCHAR(40), v VECTOR(2));".into(),
+        "INSERT INTO t VALUES (2,'old','[2,0]'),(1,'old','[1,0]');".into(),
+        "SELECT id,s,v FROM t LIMIT 1;".into(),
+        "CREATE VECTOR INDEX vi ON t(v);".into(),
+        "SELECT id,v FROM t LIMIT 1;".into(),
+    ];
+    // Both hash layouts are warm before several resizes. Commit order is
+    // intentionally different from key order, and includes signed extremes.
+    for start in (3..1027).step_by(64) {
+        let values = (start..start + 64)
+            .rev()
+            .map(|key| format!("({key},'new','[{},1]')", key % 17))
+            .collect::<Vec<_>>()
+            .join(",");
+        statements.push(format!("INSERT INTO t VALUES {values};"));
+        statements.push("SELECT id,s,v FROM t LIMIT 17;".into());
+        statements.push("SELECT id,v FROM t LIMIT 17;".into());
+    }
+    statements.extend([
+        "BEGIN;",
+        "DELETE FROM t WHERE id<100;",
+        "INSERT INTO t VALUES (2,'returned','[9,8]'),(-9223372036854775808,'min','[0,1]'),(9223372036854775807,'max','[1,0]');",
+        "UPDATE t SET s='changed',v='[7,6]' WHERE id>=1000;",
+        "SELECT id,v FROM t LIMIT 50;",
+        "COMMIT;",
+        "BEGIN;",
+        "DELETE FROM t WHERE id>=100;",
+        "SELECT id,v FROM t LIMIT 50;",
+        "ROLLBACK;",
+    ].into_iter().map(str::to_owned));
+    let checks = [
+        "SELECT id,s,v FROM t LIMIT 1;",
+        "SELECT id,v FROM t LIMIT 1;",
+        "SELECT id,s,v FROM t LIMIT 2000;",
+        "SELECT id,v FROM t LIMIT 2000;",
+        "SELECT id,s,v FROM t WHERE id>=900 LIMIT 40;",
+        "SELECT id,v FROM t WHERE id>=900 LIMIT 40;",
+        "SELECT id,s,v FROM t ORDER BY id;",
+    ]
+    .map(str::to_owned);
+    statements.extend(checks.iter().cloned());
+    let incremental = session(&data, &statements);
+    assert!(incremental.iter().all(|response| response["ok"] == true));
+    let recovered = session(&data, &checks);
+    for (before, after) in incremental[statements.len() - checks.len()..]
+        .iter()
+        .zip(&recovered)
+    {
+        assert_eq!(before["rows"], after["rows"]);
+    }
+    assert_eq!(recovered[6]["rows"].as_array().unwrap().len(), 930);
+}
+
+#[test]
 fn malformed_insert_tail_takes_precedence_over_an_earlier_duplicate() {
     let responses = run(&[
         "CREATE TABLE t (id BIGINT PRIMARY KEY, s VARCHAR(20));",
