@@ -1,5 +1,5 @@
 //! Authoritative checksummed commit log and disk-backed statement/transaction views.
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -28,8 +28,6 @@ static ZERO_PADDING: [u8; WAL_ALIGNMENT as usize] = [0; WAL_ALIGNMENT as usize];
 // Excludes the input, which is either an already charged stage or a separately
 // reserved disk read. Includes output, descriptors, dictionaries and stack scratch.
 const BLOCK_ENCODE_WORKSPACE: usize = 576 << 10;
-const LIMIT_CACHE_BYTES: u64 = 8 << 20;
-const LIMIT_CACHE_ENTRIES: usize = 8;
 const FNV: u64 = 0xcbf2_9ce4_8422_2325;
 fn checksum(mut hash: u64, buf: &[u8]) -> u64 {
     for b in buf {
@@ -659,7 +657,8 @@ pub(crate) struct Store {
     committed_cache: Option<Rc<CommittedCache>>,
     cache_lease: Weak<CommittedCache>,
     committed_limit: usize,
-    limit_indexes: VecDeque<Rc<LimitIndex>>,
+    limit_indexes: BTreeMap<String, [Option<Rc<LimitIndex>>; 2]>,
+    limit_writer_table: Option<String>,
     path: PathBuf,
     scratch: PathBuf,
     sequence: u64,
@@ -733,7 +732,8 @@ impl Store {
             synced_end: 0,
             committed_cache: None,
             cache_lease: Weak::new(),
-            limit_indexes: VecDeque::new(),
+            limit_indexes: BTreeMap::new(),
+            limit_writer_table: None,
             committed_limit: std::env::var("MINIVECTORDB_COMMITTED_BYTES")
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
@@ -801,8 +801,25 @@ impl Store {
                 // Replay visits new committed operations in historical order.
                 // Both LIMIT variants hold row offsets (not vector offsets),
                 // preserving legacy collision, resize and tombstone ordering.
-                for cached in &mut self.limit_indexes {
-                    if cached.table == *table {
+                // Retain writers for only the current replay table. Disk
+                // residency must not consume one open file per warmed index.
+                if self.limit_writer_table.as_deref() != Some(table.as_str()) {
+                    self.close_limit_writers();
+                    if self.limit_indexes.contains_key(table) {
+                        self.limit_writer_table = Some(table.clone());
+                    }
+                }
+                if let Some(indexes) = self.limit_indexes.get_mut(table) {
+                    for slot in indexes {
+                        // Outstanding views keep their old file generation.
+                        // Only a changed table needs to detach that generation.
+                        if slot
+                            .as_ref()
+                            .is_some_and(|index| Rc::strong_count(index) != 1)
+                        {
+                            *slot = None;
+                        }
+                        let Some(cached) = slot else { continue };
                         let cached = Rc::get_mut(cached)
                             .ok_or_else(|| corrupt("active limit reader during commit"))?;
                         cached.index.put(Entry {
@@ -980,11 +997,6 @@ impl Store {
         if len == 0 {
             return Ok(());
         }
-        // An outstanding reader owns the old generation. Detach it rather
-        // than modifying its slots; ordinary completed queries leave the
-        // cache uniquely owned and can advance incrementally below.
-        self.limit_indexes
-            .retain(|index| Rc::strong_count(index) == 1);
         self.discard_cached();
         let pos = self.wal.seek(SeekFrom::End(0))?;
         let staged = changes.stage.bytes();
@@ -1049,16 +1061,11 @@ impl Store {
         self.wal.write_all(&hash.to_le_bytes())?;
         // This is the only commit acknowledgement gate. Derived indexes need no fsync.
         self.wal.sync_all()?;
-        self.replay(pos + 16, len, format.compact())?;
+        let replayed = self.replay(pos + 16, len, format.compact());
+        self.close_limit_writers();
+        replayed?;
         self.committed_end = end;
         self.synced_end = end;
-        for cached in &mut self.limit_indexes {
-            let cached =
-                Rc::get_mut(cached).ok_or_else(|| corrupt("active limit reader after commit"))?;
-            cached.committed_end = end;
-            cached.bytes = cached._files.bytes()?;
-        }
-        self.trim_limit_indexes();
         Ok(())
     }
 
@@ -1172,55 +1179,40 @@ impl Store {
     }
 
     fn cached_limit_index(&mut self, table: &str, covering: bool) -> Result<Rc<LimitIndex>> {
-        if let Some(position) = self.limit_indexes.iter().position(|index| {
-            index.table == table
-                && index.covering == covering
-                && index.committed_end == self.committed_end
-        }) && let Some(index) = self.limit_indexes.remove(position)
+        if let Some(indexes) = self.limit_indexes.get(table)
+            && let Some(index) = &indexes[usize::from(covering)]
         {
-            self.limit_indexes.push_back(Rc::clone(&index));
-            return Ok(index);
+            return Ok(Rc::clone(index));
         }
 
-        // An oversized entry is kept alone so repeated large-table reads can
-        // reuse it, but it must not double the space needed by a new build.
-        if self
-            .limit_indexes
-            .front()
-            .is_some_and(|index| index.bytes > LIMIT_CACHE_BYTES)
-        {
-            self.limit_indexes.clear();
-        }
+        // These slots are derived disk state, not a resident row allocation.
+        // Evicting by file size makes alternating projections/tables replay
+        // their complete WAL on every query. Keep the files, with idle writers
+        // closed, and maintain only the affected table in commit order.
         let path = self.temp("limit");
         fs::create_dir(&path)?;
         let files = LimitFiles(path);
-        let index = self.limit_index(table, covering, &files)?;
-        let bytes = files.bytes()?;
+        let mut index = self.limit_index(table, covering, &files)?;
+        index.close_writer();
         let cached = Rc::new(LimitIndex {
-            table: table.to_owned(),
-            covering,
-            committed_end: self.committed_end,
-            bytes,
             index,
             _files: files,
             _lock: Rc::clone(&self._lock),
         });
-        self.limit_indexes.push_back(Rc::clone(&cached));
-        self.trim_limit_indexes();
+        self.limit_indexes.entry(table.to_owned()).or_default()[usize::from(covering)] =
+            Some(Rc::clone(&cached));
         Ok(cached)
     }
 
-    fn trim_limit_indexes(&mut self) {
-        // Keep at most one oversized entry, including after incremental growth.
-        while self.limit_indexes.len() > 1
-            && (self.limit_indexes.len() > LIMIT_CACHE_ENTRIES
-                || self
-                    .limit_indexes
-                    .iter()
-                    .fold(0_u64, |total, item| total.saturating_add(item.bytes))
-                    > LIMIT_CACHE_BYTES)
+    fn close_limit_writers(&mut self) {
+        if let Some(table) = self.limit_writer_table.take()
+            && let Some(indexes) = self.limit_indexes.get_mut(&table)
         {
-            self.limit_indexes.pop_front();
+            for index in indexes.iter_mut().flatten() {
+                if let Some(index) = Rc::get_mut(index) {
+                    index.index.close_writer();
+                }
+            }
         }
     }
 
@@ -1330,7 +1322,13 @@ impl Store {
             frame = end;
         }
         if covering {
-            vector.ok_or_else(|| corrupt("covering limit index missing"))
+            let vector = vector.ok_or_else(|| corrupt("covering limit index missing"))?;
+            // Primary slots were needed only to reconstruct the historical
+            // vector insertion order. Close before removal on every platform.
+            let primary_path = primary.path().to_owned();
+            drop(primary);
+            fs::remove_file(primary_path)?;
+            Ok(vector)
         } else {
             Ok(primary)
         }
@@ -1434,24 +1432,12 @@ pub(crate) struct View {
 }
 
 struct LimitIndex {
-    table: String,
-    covering: bool,
-    committed_end: u64,
-    bytes: u64,
     index: DiskIndex,
     _files: LimitFiles,
     _lock: Rc<File>,
 }
 
 struct LimitFiles(PathBuf);
-
-impl LimitFiles {
-    fn bytes(&self) -> Result<u64> {
-        Ok(fs::read_dir(&self.0)?.try_fold(0_u64, |total, file| {
-            Ok::<_, std::io::Error>(total.saturating_add(file?.metadata()?.len()))
-        })?)
-    }
-}
 
 impl Drop for LimitFiles {
     fn drop(&mut self) {
@@ -1814,7 +1800,7 @@ mod tests {
     }
 
     #[test]
-    fn unordered_limit_index_cache_evicts_old_tables() {
+    fn unordered_limit_revisits_many_tables_without_rebuilding() {
         let path = std::env::temp_dir().join(format!(
             "mv-limit-cache-budget-{}-{}",
             std::process::id(),
@@ -1850,7 +1836,7 @@ mod tests {
         store.commit(&changes).unwrap();
         drop(changes);
 
-        for number in 0..9 {
+        for number in 0..10 {
             let rows: Vec<_> = store
                 .unordered_limit_view(&format!("t{number}"), None, false)
                 .unwrap()
@@ -1858,27 +1844,207 @@ mod tests {
                 .collect();
             assert_eq!(rows, [i64::from(number)]);
         }
-        assert_eq!(store.limit_indexes.len(), LIMIT_CACHE_ENTRIES);
-        assert!(store.limit_indexes.iter().all(|index| index.table != "t0"));
-        assert!(
-            store
-                .limit_indexes
-                .iter()
-                .map(|index| index.bytes)
-                .sum::<u64>()
-                <= LIMIT_CACHE_BYTES
-        );
         let before_rebuild = store.sequence;
-        let rows: Vec<_> = store
-            .unordered_limit_view("t0", None, false)
-            .unwrap()
-            .map(|row| row.unwrap().key)
-            .collect();
-        assert_eq!(rows, [0]);
-        assert!(store.sequence > before_rebuild);
-        assert_eq!(store.limit_indexes.len(), LIMIT_CACHE_ENTRIES);
+        for _ in 0..3 {
+            for number in 0..10 {
+                let rows: Vec<_> = store
+                    .unordered_limit_view(&format!("t{number}"), None, false)
+                    .unwrap()
+                    .map(|row| row.unwrap().key)
+                    .collect();
+                assert_eq!(rows, [i64::from(number)]);
+                assert_eq!(
+                    store.sequence, before_rebuild,
+                    "revisiting a table rebuilt its index"
+                );
+            }
+        }
         drop(store);
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn unordered_limit_alternates_large_projections_without_rebuilding() {
+        let path = std::env::temp_dir().join(format!(
+            "mv-limit-projections-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut store = Store::open(&path).unwrap();
+        let mut changes = store.changes(store.catalog.clone()).unwrap();
+        changes
+            .push(Op::Schema(Schema {
+                name: "t".into(),
+                primary: 0,
+                columns: vec![
+                    crate::types::Column {
+                        name: "id".into(),
+                        kind: DataType::Bigint,
+                        primary: true,
+                    },
+                    crate::types::Column {
+                        name: "v".into(),
+                        kind: DataType::Vector(2),
+                        primary: false,
+                    },
+                ],
+                indexes: vec![("ix".into(), 1)],
+            }))
+            .unwrap();
+        store.commit(&changes).unwrap();
+        drop(changes);
+        for first in (0..100_000).step_by(500) {
+            let mut changes = store.changes(store.catalog.clone()).unwrap();
+            for key in first..first + 500 {
+                changes
+                    .push(Op::Put {
+                        table: "t".into(),
+                        key,
+                        row: vec![Value::Int(key), Value::Vector(vec![1.0, 2.0])],
+                    })
+                    .unwrap();
+            }
+            store.commit(&changes).unwrap();
+        }
+        for covering in [false, true] {
+            let row = store
+                .unordered_limit_view("t", None, covering)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.key, 0);
+            assert!(
+                matches!(&row.values[..], [Value::Int(0), Value::Vector(v)] if v.iter().map(|x| x.to_bits()).collect::<Vec<_>>() == [1.0_f32.to_bits(), 2.0_f32.to_bits()])
+            );
+        }
+        let warmed = store.sequence;
+        for _ in 0..3 {
+            for covering in [false, true] {
+                let row = store
+                    .unordered_limit_view("t", None, covering)
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(row.key, 0);
+                assert_eq!(
+                    store.sequence, warmed,
+                    "switching projection rebuilt committed history"
+                );
+            }
+        }
+        let mut changes = store.changes(store.catalog.clone()).unwrap();
+        changes
+            .push(Op::Put {
+                table: "t".into(),
+                key: 0,
+                row: vec![Value::Int(0), Value::Vector(vec![3.0, 4.0])],
+            })
+            .unwrap();
+        store.commit(&changes).unwrap();
+        drop(changes);
+        let committed = store.sequence;
+        for covering in [false, true] {
+            let row = store
+                .unordered_limit_view("t", None, covering)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(&row.values[..], [Value::Int(0), Value::Vector(v)] if v.iter().map(|x| x.to_bits()).collect::<Vec<_>>() == [3.0_f32.to_bits(), 4.0_f32.to_bits()])
+            );
+            assert_eq!(
+                store.sequence, committed,
+                "committing invalidated a resident projection"
+            );
+        }
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unordered_limit_closes_idle_index_writers() {
+        let path = std::env::temp_dir().join(format!(
+            "mv-limit-descriptors-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut store = Store::open(&path).unwrap();
+        let mut changes = store.changes(store.catalog.clone()).unwrap();
+        for number in 0..12 {
+            let table = format!("t{number}");
+            changes
+                .push(Op::Schema(Schema {
+                    name: table.clone(),
+                    primary: 0,
+                    columns: vec![crate::types::Column {
+                        name: "id".into(),
+                        kind: DataType::Bigint,
+                        primary: true,
+                    }],
+                    indexes: Vec::new(),
+                }))
+                .unwrap();
+            changes
+                .push(Op::Put {
+                    table,
+                    key: number,
+                    row: vec![Value::Int(number)],
+                })
+                .unwrap();
+        }
+        store.commit(&changes).unwrap();
+        drop(changes);
+        let descriptors = || {
+            fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
+                .filter(|target| target.starts_with(&path))
+                .count()
+        };
+        let before = descriptors();
+        for number in 0..12 {
+            let row = store
+                .unordered_limit_view(&format!("t{number}"), None, false)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.key, number);
+        }
+        assert_eq!(
+            descriptors(),
+            before,
+            "completed LIMIT queries retain writer descriptors"
+        );
+        let mut changes = store.changes(store.catalog.clone()).unwrap();
+        for number in 0..12 {
+            changes
+                .push(Op::Put {
+                    table: format!("t{number}"),
+                    key: number,
+                    row: vec![Value::Int(number)],
+                })
+                .unwrap();
+        }
+        store.commit(&changes).unwrap();
+        drop(changes);
+        assert_eq!(
+            descriptors(),
+            before,
+            "committing retained compatibility-index writers"
+        );
+        drop(store);
+        fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

@@ -16,7 +16,7 @@ pub(crate) struct Entry {
 
 pub(crate) struct DiskIndex {
     path: PathBuf,
-    file: File,
+    file: Option<File>,
     capacity: u64,
     len: u64,
 }
@@ -53,7 +53,7 @@ impl DiskIndex {
         )?;
         Ok(Self {
             path,
-            file,
+            file: Some(file),
             capacity,
             len: 0,
         })
@@ -61,17 +61,28 @@ impl DiskIndex {
     pub fn reader(&self) -> Result<Self> {
         Ok(Self {
             path: self.path.clone(),
-            file: File::open(&self.path)?,
+            file: Some(File::open(&self.path)?),
             capacity: self.capacity,
             len: self.len,
         })
     }
+    // Retain derived slots without retaining an idle writer. Queries open
+    // their own bounded iterator; a later commit reopens the writer lazily.
+    pub fn close_writer(&mut self) {
+        self.file = None;
+    }
+    fn file(&mut self) -> Result<&mut File> {
+        if self.file.is_none() {
+            self.file = Some(OpenOptions::new().read(true).write(true).open(&self.path)?);
+        }
+        Ok(self.file.as_mut().expect("index file opened above"))
+    }
     pub fn get(&mut self, key: i64) -> Result<Option<Entry>> {
         let mut slot = hash(key) & (self.capacity - 1);
         for _ in 0..self.capacity {
-            self.file.seek(SeekFrom::Start(slot * SLOT))?;
+            self.file()?.seek(SeekFrom::Start(slot * SLOT))?;
             let mut raw = [0; 24];
-            self.file.read_exact(&mut raw)?;
+            self.file()?.read_exact(&mut raw)?;
             match decode(raw) {
                 None => return Ok(None),
                 Some(e) if e.key == key => return Ok(Some(e)),
@@ -87,9 +98,9 @@ impl DiskIndex {
         }
         let mut slot = hash(entry.key) & (self.capacity - 1);
         loop {
-            self.file.seek(SeekFrom::Start(slot * SLOT))?;
+            self.file()?.seek(SeekFrom::Start(slot * SLOT))?;
             let mut raw = [0; 24];
-            self.file.read_exact(&mut raw)?;
+            self.file()?.read_exact(&mut raw)?;
             let old = decode(raw);
             if old.is_none_or(|e| e.key == entry.key) {
                 if old.is_none() {
@@ -99,8 +110,8 @@ impl DiskIndex {
                     .copy_from_slice(&(if entry.deleted { 2_u64 } else { 1_u64 }).to_le_bytes());
                 raw[8..16].copy_from_slice(&entry.key.to_le_bytes());
                 raw[16..24].copy_from_slice(&entry.offset.to_le_bytes());
-                self.file.seek(SeekFrom::Start(slot * SLOT))?;
-                self.file.write_all(&raw)?;
+                self.file()?.seek(SeekFrom::Start(slot * SLOT))?;
+                self.file()?.write_all(&raw)?;
                 return Ok(());
             }
             slot = (slot + 1) & (self.capacity - 1);
