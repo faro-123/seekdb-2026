@@ -11,7 +11,7 @@ use crate::disk_index::{DiskIndex, Entry};
 use crate::position_index::{PositionBudget, PositionEntries, PositionIndex, PositionReader};
 use crate::read_batch::{OffsetBatch, WalRead};
 use crate::stage::{Budget, Reservation, Stage};
-use crate::stage_index::{StageEntries, StageIndex, StageLookup};
+use crate::stage_index::{Run, StageEntries, StageIndex, StageLookup};
 use crate::types::{DataType, Schema, Value};
 use crate::vector_codec::{self, HEADER_BYTES, Header as PackedHeader};
 use crate::{Error, Result};
@@ -659,6 +659,7 @@ pub(crate) struct Store {
     committed_limit: usize,
     limit_indexes: BTreeMap<String, [Option<Rc<LimitIndex>>; 2]>,
     limit_writer_table: Option<String>,
+    staged_limit_indexes: BTreeMap<String, (Run, Rc<LimitIndex>)>,
     path: PathBuf,
     scratch: PathBuf,
     sequence: u64,
@@ -734,6 +735,7 @@ impl Store {
             cache_lease: Weak::new(),
             limit_indexes: BTreeMap::new(),
             limit_writer_table: None,
+            staged_limit_indexes: BTreeMap::new(),
             committed_limit: std::env::var("MINIVECTORDB_COMMITTED_BYTES")
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
@@ -1149,7 +1151,7 @@ impl Store {
             staged: transaction
                 .map(|tx| tx.stage.reader().map(WalRead::Stage))
                 .transpose()?,
-            _limit_files: None,
+            _stage_limit_index: None,
             _limit_index: None,
         })
     }
@@ -1168,14 +1170,39 @@ impl Store {
             )?));
             view._limit_index = Some(index);
         }
-        if let Some(index) = transaction.and_then(|tx| tx.indexes.get(table)) {
-            let path = self.temp("limit");
-            fs::create_dir(&path)?;
-            let files = LimitFiles(path);
-            view.extra = Some(index.legacy_entries(files.0.join("stage.hash"))?);
-            view._limit_files = Some(files);
+        if let Some(run) = transaction
+            .and_then(|tx| tx.indexes.get(table))
+            .and_then(StageIndex::run)
+        {
+            let index = self.cached_staged_limit_index(table, run)?;
+            view.extra = Some(StageEntries::Disk(index.index.entries()?));
+            view._stage_limit_index = Some(index);
         }
         Ok(view)
+    }
+
+    fn cached_staged_limit_index(&mut self, table: &str, run: Run) -> Result<Rc<LimitIndex>> {
+        if let Some((shape, index)) = self.staged_limit_indexes.get(table)
+            && *shape == run
+        {
+            return Ok(Rc::clone(index));
+        }
+        // Cache only key/offset geometry, never staged values. Even a later
+        // transaction with the same geometry reads its own stage. A changed
+        // run gets a new file generation; existing views retain the old one.
+        let path = self.temp("limit");
+        fs::create_dir(&path)?;
+        let files = LimitFiles(path);
+        let mut index = run.legacy_index(files.0.join("stage.hash"))?;
+        index.close_writer();
+        let cached = Rc::new(LimitIndex {
+            index,
+            _files: files,
+            _lock: Rc::clone(&self._lock),
+        });
+        self.staged_limit_indexes
+            .insert(table.to_owned(), (run, Rc::clone(&cached)));
+        Ok(cached)
     }
 
     fn cached_limit_index(&mut self, table: &str, covering: bool) -> Result<Rc<LimitIndex>> {
@@ -1427,7 +1454,7 @@ pub(crate) struct View {
     wal: WalRead,
     blocks: BlockReader,
     staged: Option<WalRead>,
-    _limit_files: Option<LimitFiles>,
+    _stage_limit_index: Option<Rc<LimitIndex>>,
     _limit_index: Option<Rc<LimitIndex>>,
 }
 
@@ -1685,6 +1712,124 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staged_limit_reuses_run_geometry_and_preserves_prior_views() {
+        let path = std::env::temp_dir().join(format!(
+            "mv-limit-staged-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut store = Store::open(&path).unwrap();
+        let mut schema = store.changes(store.catalog.clone()).unwrap();
+        schema
+            .push(Op::Schema(Schema {
+                name: "t".into(),
+                primary: 0,
+                columns: vec![
+                    crate::types::Column {
+                        name: "id".into(),
+                        kind: DataType::Bigint,
+                        primary: true,
+                    },
+                    crate::types::Column {
+                        name: "n".into(),
+                        kind: DataType::Bigint,
+                        primary: false,
+                    },
+                ],
+                indexes: Vec::new(),
+            }))
+            .unwrap();
+        store.commit(&schema).unwrap();
+        drop(schema);
+        let mut first = store.changes(store.catalog.clone()).unwrap();
+        for key in 0..4095 {
+            first
+                .push(Op::Put {
+                    table: "t".into(),
+                    key,
+                    row: vec![Value::Int(key), Value::Int(1)],
+                })
+                .unwrap();
+        }
+        let read = |store: &mut Store, changes: &Changes| -> Vec<i64> {
+            store
+                .unordered_limit_view("t", Some(changes), false)
+                .unwrap()
+                .map(|row| row.unwrap().key)
+                .collect()
+        };
+        let expected = read(&mut store, &first);
+        assert_eq!(expected.len(), 4095);
+        let warmed = store.sequence;
+        assert_eq!(read(&mut store, &first), expected);
+        assert_eq!(store.sequence, warmed, "unchanged staged run rebuilt LIMIT");
+        let prior = store
+            .unordered_limit_view("t", Some(&first), false)
+            .unwrap();
+        first
+            .push(Op::Put {
+                table: "t".into(),
+                key: 4095,
+                row: vec![Value::Int(4095), Value::Int(1)],
+            })
+            .unwrap();
+        assert_eq!(read(&mut store, &first).len(), 4096);
+        assert_eq!(
+            prior.map(|row| row.unwrap().key).collect::<Vec<_>>(),
+            expected
+        );
+        let warmed = store.sequence;
+        assert_eq!(read(&mut store, &first).len(), 4096);
+        assert_eq!(store.sequence, warmed, "4096-row staged run rebuilt LIMIT");
+        drop(first);
+
+        // A later transaction may have the same geometry but different values.
+        let mut next = store.changes(store.catalog.clone()).unwrap();
+        for key in 0..4096 {
+            next.push(Op::Put {
+                table: "t".into(),
+                key,
+                row: vec![Value::Int(key), Value::Int(9)],
+            })
+            .unwrap();
+        }
+        for row in store.unordered_limit_view("t", Some(&next), false).unwrap() {
+            assert!(matches!(
+                &row.unwrap().values[..],
+                [Value::Int(_), Value::Int(9)]
+            ));
+        }
+        next.push(Op::Put {
+            table: "t".into(),
+            key: 4096,
+            row: vec![Value::Int(4096), Value::Int(9)],
+        })
+        .unwrap();
+        assert_eq!(read(&mut store, &next).len(), 4097);
+        next.push(Op::Delete {
+            table: "t".into(),
+            key: 0,
+        })
+        .unwrap();
+        let remaining = read(&mut store, &next);
+        assert_eq!(remaining.len(), 4096);
+        assert!(!remaining.contains(&0));
+        store.commit(&next).unwrap();
+        drop(next);
+        let committed: Vec<_> = store
+            .unordered_limit_view("t", None, false)
+            .unwrap()
+            .map(|row| row.unwrap().key)
+            .collect();
+        assert_eq!(committed, remaining);
+        drop(store);
+        fs::remove_dir_all(path).unwrap();
+    }
 
     #[test]
     fn unordered_limit_reuses_indexes_and_preserves_active_readers() {

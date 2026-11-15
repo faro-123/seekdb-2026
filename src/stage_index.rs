@@ -10,7 +10,7 @@ use crate::disk_index::{DiskIndex, Entries, Entry};
 // Bound the number of slots that can be materialized at one fallback point.
 const MAX_RUN_ROWS: u64 = 4096;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Run {
     first_key: i64,
     first_offset: u64,
@@ -19,6 +19,9 @@ pub(crate) struct Run {
 }
 
 impl Run {
+    pub(crate) fn legacy_index(self, path: PathBuf) -> Result<DiskIndex> {
+        StageIndex::materialize(path, (0..self.count).map(|ordinal| self.entry(ordinal)))
+    }
     fn new(entry: Entry) -> Self {
         Self {
             first_key: entry.key,
@@ -137,14 +140,10 @@ impl StageIndex {
         }
     }
 
-    pub(crate) fn legacy_entries(&self, path: PathBuf) -> Result<StageEntries> {
+    pub(crate) fn run(&self) -> Option<Run> {
         match self {
-            Self::Run { run, .. } => {
-                let disk =
-                    Self::materialize(path, (0..run.count).map(|ordinal| run.entry(ordinal)))?;
-                Ok(StageEntries::Disk(disk.entries()?))
-            }
-            Self::Disk(disk) => Ok(StageEntries::Disk(disk.entries()?)),
+            Self::Run { run, .. } => Some(*run),
+            Self::Disk(_) => None,
         }
     }
 
