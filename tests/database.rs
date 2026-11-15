@@ -696,8 +696,10 @@ fn compact_commits_recover_multiple_blocks_and_mix_with_legacy_rows() {
     let result = session(&data, &sql);
     assert!(result.iter().all(|r| r["ok"] == true), "{result:?}");
     let wal = fs::read(data.0.join("commits.mv1")).unwrap();
-    assert!(wal.windows(8).any(|bytes| bytes == b"MVTX0002"));
-    assert!(wal.len() < 30_000, "shared text must shrink: {}", wal.len());
+    if !cfg!(feature = "migration-ablation") {
+        assert!(wal.windows(8).any(|bytes| bytes == b"MVTX0002"));
+        assert!(wal.len() < 30_000, "shared text must shrink: {}", wal.len());
+    }
 
     let project = "SELECT id,body,v FROM t WHERE c='甲' ORDER BY L2_DISTANCE(v,'[1,0,0]') LIMIT 2;";
     for budget in [0, 8 << 20] {

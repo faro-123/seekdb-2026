@@ -191,6 +191,9 @@ impl Stage {
     }
 
     fn fit_memory(&mut self, end: usize) -> bool {
+        if cfg!(feature = "migration-ablation") {
+            return false;
+        }
         let previous = match &mut self.backend {
             Backend::Empty => None,
             Backend::File(_) => return false,
@@ -297,6 +300,32 @@ impl Drop for Stage {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "migration-ablation")]
+    #[test]
+    fn ablation_stages_on_disk_and_preserves_reader_offsets() {
+        let path = std::env::temp_dir().join(format!("mv-ablation-stage-{}", std::process::id()));
+        let mut stage = Stage::new(path.clone(), Budget::default());
+        assert_eq!(
+            stage.append(3, |out| Ok(out.write_all(b"one")?)).unwrap(),
+            0
+        );
+        let mut reader = stage.reader().unwrap();
+        assert!(
+            stage.bytes().is_none(),
+            "ablation must not retain an in-memory stage"
+        );
+        assert_eq!(
+            stage.append(3, |out| Ok(out.write_all(b"two")?)).unwrap(),
+            3
+        );
+        let mut bytes = [0; 6];
+        reader.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"onetwo");
+        drop((reader, stage));
+        assert!(!path.exists());
+    }
+
+    #[cfg(not(feature = "migration-ablation"))]
     #[test]
     fn budget_counts_pinned_allocations_and_does_not_remove_foreign_files() {
         let unique = std::time::SystemTime::now()

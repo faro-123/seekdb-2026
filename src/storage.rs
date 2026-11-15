@@ -1003,7 +1003,8 @@ impl Store {
         let pos = self.wal.seek(SeekFrom::End(0))?;
         let staged = changes.stage.bytes();
         let positions = self.position_budget.lend_unused();
-        let reservation = if len <= commit_block::MAX_INPUT_BYTES as u64
+        let reservation = if !cfg!(feature = "migration-ablation")
+            && len <= commit_block::MAX_INPUT_BYTES as u64
             && pos <= BlockPosition::MAX_START - (len + 32)
         {
             let input_bytes = if staged.is_some() { 0 } else { len as usize };
@@ -2304,7 +2305,10 @@ mod tests {
         let path_wal = path.join("commits.mv1");
         let prefix = std::fs::read(&path_wal).unwrap();
         assert!(prefix.starts_with(b"MVTX0001"));
-        assert!(prefix.windows(8).any(|bytes| bytes == b"MVTX0002"));
+        assert_eq!(
+            prefix.windows(8).any(|bytes| bytes == b"MVTX0002"),
+            !cfg!(feature = "migration-ablation")
+        );
         let mut wide = store.changes(store.catalog.clone()).unwrap();
         let mut rng = 43_u32;
         for key in 2..130 {
@@ -2326,8 +2330,12 @@ mod tests {
         drop(store);
         let full = std::fs::read(&path_wal).unwrap();
         assert_eq!(&full[..prefix.len()], &prefix);
-        assert_eq!(&full[prefix.len()..prefix.len() + 8], b"MVTX0003");
-        assert_eq!(full.len() % 4096, 0);
+        if cfg!(feature = "migration-ablation") {
+            assert_eq!(&full[prefix.len()..prefix.len() + 8], HEADER);
+        } else {
+            assert_eq!(&full[prefix.len()..prefix.len() + 8], b"MVTX0003");
+            assert_eq!(full.len() % 4096, 0);
+        }
         let store = Store::open(&path).unwrap();
         assert_eq!(
             store
@@ -2504,7 +2512,7 @@ mod tests {
         assert!(!first_path.exists() && !second_path.exists());
         fs::remove_dir_all(path).unwrap();
 
-        assert!(was_memory, "small stages must start without a disk file");
+        assert_eq!(was_memory, !cfg!(feature = "migration-ablation"));
         assert!(second_spilled && first_spilled);
         for (values, key, text_len) in
             [(previous, 1, length), (current, 3, 100), (other, 2, length)]
@@ -2571,13 +2579,78 @@ mod tests {
         assert_eq!(&wal[position..position + HEADER.len()], HEADER);
         assert_eq!(
             &wal[compact_position..compact_position + BLOCK_HEADER.len()],
-            BLOCK_HEADER
+            if cfg!(feature = "migration-ablation") {
+                HEADER
+            } else {
+                BLOCK_HEADER
+            }
         );
         let store = Store::open(&path).unwrap();
         let view = store.view("t", None).unwrap();
         let mut keys = view.map(|row| row.unwrap().key).collect::<Vec<_>>();
         keys.sort_unstable();
         assert_eq!(keys, (1..=8).collect::<Vec<_>>());
+        drop(store);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[cfg(feature = "migration-ablation")]
+    #[test]
+    fn ablation_writes_compressible_rows_as_legacy_frames_and_recovers() {
+        let path = std::env::temp_dir().join(format!("mv-ablation-commit-{}", std::process::id()));
+        let mut store = Store::open(&path).unwrap();
+        let mut changes = store.changes(Catalog::new()).unwrap();
+        changes
+            .push(Op::Schema(Schema {
+                name: "t".into(),
+                primary: 0,
+                indexes: vec![],
+                columns: vec![
+                    crate::types::Column {
+                        name: "id".into(),
+                        kind: DataType::Bigint,
+                        primary: true,
+                    },
+                    crate::types::Column {
+                        name: "s".into(),
+                        kind: DataType::Varchar(256),
+                        primary: false,
+                    },
+                ],
+            }))
+            .unwrap();
+        store.commit(&changes).unwrap();
+        drop(changes);
+        let offset = store.committed_end as usize;
+        let mut changes = store.changes(store.catalog.clone()).unwrap();
+        for key in 0..32 {
+            changes
+                .push(Op::Put {
+                    table: "t".into(),
+                    key,
+                    row: vec![
+                        Value::Int(key),
+                        Value::Text("shared-dictionary-value".repeat(8)),
+                    ],
+                })
+                .unwrap();
+        }
+        store.commit(&changes).unwrap();
+        drop((changes, store));
+        let wal = fs::read(path.join("commits.mv1")).unwrap();
+        assert_eq!(
+            &wal[offset..offset + HEADER.len()],
+            HEADER,
+            "ablation must not write compact commit blocks"
+        );
+        let store = Store::open(&path).unwrap();
+        let mut keys = store
+            .view("t", None)
+            .unwrap()
+            .map(|row| row.unwrap().key)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(keys, (0..32).collect::<Vec<_>>());
         drop(store);
         fs::remove_dir_all(path).unwrap();
     }

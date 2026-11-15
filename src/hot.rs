@@ -1031,11 +1031,15 @@ pub(crate) struct HotCache {
 
 impl HotCache {
     pub fn new() -> Self {
-        let budget = std::env::var("MINIVECTORDB_HOT_BYTES")
-            .ok()
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(MAX_BYTES)
-            .min(MAX_BYTES);
+        let budget = if cfg!(feature = "migration-ablation") {
+            0
+        } else {
+            std::env::var("MINIVECTORDB_HOT_BYTES")
+                .ok()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(MAX_BYTES)
+                .min(MAX_BYTES)
+        };
         Self::with_budget(budget)
     }
 
@@ -1196,6 +1200,54 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(feature = "migration-ablation")]
+    #[test]
+    fn ablation_declines_an_eligible_hot_snapshot() {
+        let path = std::env::temp_dir().join(format!(
+            "mv-ablation-hot-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let schema = Schema {
+            name: "t".into(),
+            primary: 0,
+            columns: vec![
+                Column {
+                    name: "id".into(),
+                    kind: DataType::Bigint,
+                    primary: true,
+                },
+                Column {
+                    name: "v".into(),
+                    kind: DataType::Vector(2),
+                    primary: false,
+                },
+            ],
+            indexes: vec![("vi".into(), 1)],
+        };
+        let mut store = Store::open(&path).unwrap();
+        let mut changes = store.changes(store.catalog.clone()).unwrap();
+        changes.push(Op::Schema(schema.clone())).unwrap();
+        changes
+            .push(Op::Put {
+                table: "t".into(),
+                key: 7,
+                row: vec![Value::Int(7), Value::Vector(vec![3.0, 4.0])],
+            })
+            .unwrap();
+        store.commit(&changes).unwrap();
+        let mut cache = HotCache::new();
+        assert!(
+            cache
+                .get(&mut store, &schema, 1, &[], Some(&[0.0, 0.0]))
+                .unwrap()
+                .is_none(),
+            "ablation must use generic exact execution for eligible vectors"
+        );
+        drop((changes, store));
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
