@@ -14,8 +14,9 @@
 - [x] Gate the three existing paths. Test default ablation and original `--no-default-features`; retain optimization-specific tests in the latter and document any conditional assertions.
 - [x] Run fmt, Clippy all targets/features, Rust tests, original Dockerfile build, public 20 cases, fresh analytical oracle, transaction/error/restart coverage and focused LIMIT comparisons.
 - [x] Record performance impact on the identical diagnostic input; do not extrapolate to official E/5000 or claim root cause.
-- [ ] Update conversation with a compact truthful diagnostic note; retain original quotes and do not fabricate user messages. Verify UTF-8 JSON and <=131072 bytes.
-- [ ] Review, commit exact owned paths, push the diagnostic branch, compare remote SHA/tree/material bytes and deliver fields plus local archive.
+- [x] Update conversation with a compact truthful diagnostic note; retain original quotes and do not fabricate user messages. Verify UTF-8 JSON and <=131072 bytes.
+- [x] Review implementation and commit exact owned source paths. Build the committed archive and compare its ELF with the tested image.
+- Publication gate: push only the diagnostic branch, compare remote SHA/tree/material bytes and generate the final local archive and handoff.json. The post-push result is recorded in analysis/migration-ablation-20261115/handoff.json to avoid a self-referential commit SHA.
 
 ## Review focus
 
@@ -28,3 +29,4 @@ Disk staging must preserve reader offsets and failed-statement isolation. Legacy
 - Linux tests: default 80, original paths 78. Public cases 20, oracle 782 SQL/8 restarts, LIMIT differential 359 SQL per version. Windows fmt/Clippy pass. Fresh independent review found no blocker/major defect in the implementation diff.
 - Single-round query timing is 926.718 ms versus 93.774 ms (781) and 151.015 ms (c919) for 200 requests: retain as diagnostic only. Full evidence and the corrected oracle int/float expectation are documented in docs/migration-ablation-20261115.md.
 - User additionally requested historical migration analysis and persistent memory of all this chat's reports; write source-grounded history and a report archive/index under shared project memory.
+- Tested source commit cf9b8c58fcbcde0e4fe73eb4d936e3aabeed31b9; committed-archive build exactly matches tested ELF da034ba3e0b03c47869dd2c6c802466699b9591b87ec56864210a61e3b4b25ca. Material is 130205 UTF-8 bytes with original conversations unchanged.
