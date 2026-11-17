@@ -838,10 +838,13 @@ impl Store {
     fn build_vector_index(&mut self, table: &str) -> Result<()> {
         // A flat index points directly into committed binary vector payloads.
         // It can be rebuilt from the same row versions as the primary index.
-        let mut index = PositionIndex::create(self.temp("vectors"), self.position_budget.clone())?;
+        let path = self.temp("vectors");
+        let primary = &self.indexes[table];
+        let mut index =
+            PositionIndex::create_vector_rebuild(path, self.position_budget.clone(), primary)?;
         let mut log = self.wal_reader()?.buffered();
         let mut blocks = BlockReader::new(self.stage_budget.clone());
-        let mut slots = OffsetBatch::from_positions(self.indexes[table].entries()?).ordered();
+        let mut slots = OffsetBatch::from_positions(primary.entries()?).ordered();
         while let Some(slot) = slots.next() {
             let slot = slot?;
             if slot.deleted {
@@ -1284,12 +1287,11 @@ impl Store {
                         let schema: Schema = serde_json::from_reader((&mut reader).take(size - 1))?;
                         if schema.name == table && !schema.indexes.is_empty() {
                             let mut index = DiskIndex::create(files.0.join("vector.hash"))?;
-                            for entry in primary.entries()? {
-                                let entry = entry?;
-                                if !entry.deleted {
-                                    index.put(entry)?;
-                                }
-                            }
+                            index.copy_distinct(
+                                primary
+                                    .entries()?
+                                    .filter(|entry| !matches!(entry, Ok(slot) if slot.deleted)),
+                            )?;
                             vector = Some(index);
                         }
                     }

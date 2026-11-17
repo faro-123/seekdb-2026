@@ -39,7 +39,7 @@ impl DiskIndex {
     pub fn create(path: PathBuf) -> Result<Self> {
         Self::sized(path, 64)
     }
-    fn sized(path: PathBuf, capacity: u64) -> Result<Self> {
+    pub fn sized(path: PathBuf, capacity: u64) -> Result<Self> {
         let file = OpenOptions::new()
             .create(true)
             .truncate(true)
@@ -106,31 +106,79 @@ impl DiskIndex {
                 if old.is_none() {
                     self.len += 1;
                 }
-                raw[0..8]
-                    .copy_from_slice(&(if entry.deleted { 2_u64 } else { 1_u64 }).to_le_bytes());
-                raw[8..16].copy_from_slice(&entry.key.to_le_bytes());
-                raw[16..24].copy_from_slice(&entry.offset.to_le_bytes());
-                self.file()?.seek(SeekFrom::Start(slot * SLOT))?;
-                self.file()?.write_all(&raw)?;
-                return Ok(());
+                return self.write_slot(slot, entry);
             }
             slot = (slot + 1) & (self.capacity - 1);
         }
     }
-    fn grow(&mut self) -> Result<()> {
+    fn write_slot(&mut self, slot: u64, entry: Entry) -> Result<()> {
+        let mut raw = [0; SLOT as usize];
+        raw[0..8].copy_from_slice(&(if entry.deleted { 2_u64 } else { 1_u64 }).to_le_bytes());
+        raw[8..16].copy_from_slice(&entry.key.to_le_bytes());
+        raw[16..24].copy_from_slice(&entry.offset.to_le_bytes());
+        let file = self.file()?;
+        file.seek(SeekFrom::Start(slot * SLOT))?;
+        file.write_all(&raw)?;
+        Ok(())
+    }
+    pub fn capacity(&self) -> u64 {
+        self.capacity
+    }
+    fn expanded(&self) -> Result<Self> {
         let capacity = self
             .capacity
             .checked_mul(2)
             .ok_or_else(|| Error::new("resource_limit", "index too large"))?;
         let path = self.path.with_extension(format!("hash{capacity}"));
-        let mut next = Self::sized(path, capacity)?;
+        Self::sized(path, capacity)
+    }
+    fn grow(&mut self) -> Result<()> {
+        let mut next = self.expanded()?;
         for entry in self.entries()? {
             next.put(entry?)?;
         }
+        self.replace_slots(next)
+    }
+    fn replace_slots(&mut self, next: Self) -> Result<()> {
         let old = std::mem::replace(self, next);
         let path = old.path.clone();
         drop(old);
         fs::remove_file(path)?;
+        Ok(())
+    }
+
+    // Copies distinct keys into an empty index. Match put's growth threshold
+    // and first-free-slot rule so a historical LIMIT sees the same row order.
+    pub fn copy_distinct(
+        &mut self,
+        entries: impl IntoIterator<Item = Result<Entry>>,
+    ) -> Result<()> {
+        debug_assert_eq!(self.len, 0);
+        let mut vacant = Vacancy::new(self.capacity);
+        for entry in entries {
+            let entry = entry?;
+            if self.len * 10 >= self.capacity * 7 {
+                let mut next = self.expanded()?;
+                let mut next_vacant = Vacancy::new(next.capacity);
+                for old in self.entries()? {
+                    next.put_distinct(old?, &mut next_vacant)?;
+                }
+                self.replace_slots(next)?;
+                vacant = next_vacant;
+            }
+            self.put_distinct(entry, &mut vacant)?;
+        }
+        Ok(())
+    }
+
+    fn put_distinct(&mut self, entry: Entry, vacant: &mut Option<Vacancy>) -> Result<()> {
+        let Some(vacant) = vacant.as_mut() else {
+            return self.put(entry);
+        };
+        let home = hash(entry.key) & (self.capacity - 1);
+        let slot = vacant.take(home as usize);
+        self.write_slot(slot as u64, entry)?;
+        self.len += 1;
         Ok(())
     }
     pub fn entries(&self) -> Result<Entries> {
@@ -138,6 +186,40 @@ impl DiskIndex {
     }
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+struct Vacancy {
+    words: Vec<u64>,
+}
+
+impl Vacancy {
+    fn new(capacity: u64) -> Option<Self> {
+        // Only bulk copies need this scratch space. The two live generations
+        // combined use at most 192 KiB while rehashing.
+        const MAX_BYTES: u64 = 128 << 10;
+        (capacity <= MAX_BYTES * 8).then(|| Self {
+            words: vec![u64::MAX; (capacity / 64) as usize],
+        })
+    }
+
+    fn take(&mut self, home: usize) -> usize {
+        let word = home / 64;
+        let suffix = self.words[word] & (u64::MAX << (home % 64));
+        let (word, available) = if suffix != 0 {
+            (word, suffix)
+        } else {
+            self.words
+                .iter()
+                .enumerate()
+                .skip(word + 1)
+                .chain(self.words.iter().enumerate().take(word + 1))
+                .find_map(|(index, &bits)| (bits != 0).then_some((index, bits)))
+                .expect("index is below its growth threshold")
+        };
+        let bit = available.trailing_zeros() as usize;
+        self.words[word] &= !(1 << bit);
+        word * 64 + bit
     }
 }
 pub(crate) struct Entries {
@@ -167,5 +249,41 @@ impl Iterator for Entries {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bulk_copy_preserves_slots_through_collisions_and_growth() {
+        let root =
+            std::env::temp_dir().join(format!("minivectordb-bulk-slots-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let mut ordinary = DiskIndex::create(root.join("ordinary.index")).unwrap();
+        let mut bulk = DiskIndex::create(root.join("bulk.index")).unwrap();
+        let entries: Vec<_> = (0..120_000_i64)
+            .filter(|&key| hash(key) & 63 >= 60)
+            .take(500)
+            .enumerate()
+            .map(|(ordinal, key)| Entry {
+                key,
+                offset: ordinal as u64,
+                deleted: ordinal % 13 == 0,
+            })
+            .collect();
+        assert_eq!(entries.len(), 500);
+        for &entry in &entries {
+            ordinary.put(entry).unwrap();
+        }
+        bulk.copy_distinct(entries.into_iter().map(Ok)).unwrap();
+        assert_eq!(
+            fs::read(ordinary.path()).unwrap(),
+            fs::read(bulk.path()).unwrap()
+        );
+        drop(ordinary);
+        drop(bulk);
+        fs::remove_dir_all(root).unwrap();
     }
 }

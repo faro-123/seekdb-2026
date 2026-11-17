@@ -379,6 +379,23 @@ impl PositionIndex {
         Ok(Self { backend, budget })
     }
 
+    pub fn create_vector_rebuild(
+        path: PathBuf,
+        budget: PositionBudget,
+        primary: &Self,
+    ) -> Result<Self> {
+        if let Backend::Disk(source) = &primary.backend {
+            // A smaller power-of-two mask folds adjacent ranges of primary
+            // slots onto the same vector slots before normal growth catches up.
+            let disk = DiskIndex::sized(path, source.capacity())?;
+            return Ok(Self {
+                backend: Backend::Disk(disk),
+                budget,
+            });
+        }
+        Self::create(path, budget)
+    }
+
     pub fn get(&mut self, key: i64) -> Result<Option<Entry>> {
         match &mut self.backend {
             Backend::Resident { rows, .. } => Ok(rows.get(key)),
