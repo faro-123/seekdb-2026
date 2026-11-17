@@ -3,3 +3,5 @@
 !Cargo.lock
 !src/
 !src/**
+!vendor/
+!vendor/cargo-deps.tar.gz

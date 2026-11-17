@@ -2,8 +2,11 @@ FROM rust:1.99.1-slim-bookworm@sha256:392f221964669402bf4ae133d2a46c3ae270f64734
 WORKDIR /build
 COPY --link Cargo.toml Cargo.lock ./
 COPY --link src ./src
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo fetch --locked && cargo build --release --locked --offline && mkdir /runtime-data
+COPY --link vendor/cargo-deps.tar.gz /tmp/cargo-deps.tar.gz
+RUN --network=none mkdir vendor && tar -xzf /tmp/cargo-deps.tar.gz -C vendor && \
+    cargo --config 'source.crates-io.replace-with="vendored-sources"' \
+          --config 'source.vendored-sources.directory="/build/vendor"' \
+          build --release --locked --offline && mkdir /runtime-data
 
 FROM scratch AS runtime
 COPY --from=build /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib/x86_64-linux-gnu/libgcc_s.so.1
