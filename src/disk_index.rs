@@ -290,28 +290,41 @@ impl Vacancy {
 }
 pub(crate) struct Entries {
     reader: BufReader<File>,
-    remaining: u64,
-    format: SlotFormat,
+    remaining_and_format: u64,
 }
 impl Entries {
+    // File lengths are checked as capacity * width, so the count fits
+    // below this bit even in the smaller format.
+    const FULL_KEY: u64 = 1 << 63;
+
     fn open(path: &Path, remaining: u64, format: SlotFormat) -> Result<Self> {
+        debug_assert!(remaining < Self::FULL_KEY);
+        let format_bit = if format == SlotFormat::FullKey {
+            Self::FULL_KEY
+        } else {
+            0
+        };
         Ok(Self {
             reader: BufReader::new(File::open(path)?),
-            remaining,
-            format,
+            remaining_and_format: remaining | format_bit,
         })
     }
 }
 impl Iterator for Entries {
     type Item = Result<Entry>;
     fn next(&mut self) -> Option<Self::Item> {
-        while self.remaining > 0 {
-            self.remaining -= 1;
-            match self.format.read(&mut self.reader) {
+        let format = if self.remaining_and_format & Self::FULL_KEY == 0 {
+            SlotFormat::Compact
+        } else {
+            SlotFormat::FullKey
+        };
+        while self.remaining_and_format & !Self::FULL_KEY != 0 {
+            self.remaining_and_format -= 1;
+            match format.read(&mut self.reader) {
                 Ok(Some(entry)) => return Some(Ok(entry)),
                 Ok(None) => {}
                 Err(error) => {
-                    self.remaining = 0;
+                    self.remaining_and_format = 0;
                     return Some(Err(error.into()));
                 }
             }
