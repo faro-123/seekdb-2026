@@ -387,7 +387,7 @@ impl PositionIndex {
         if let Backend::Disk(source) = &primary.backend {
             // A smaller power-of-two mask folds adjacent ranges of primary
             // slots onto the same vector slots before normal growth catches up.
-            let disk = DiskIndex::sized(path, source.capacity())?;
+            let disk = source.empty_like(path)?;
             return Ok(Self {
                 backend: Backend::Disk(disk),
                 budget,

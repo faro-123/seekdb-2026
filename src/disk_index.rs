@@ -5,9 +5,59 @@ use std::path::{Path, PathBuf};
 
 use crate::{Error, Result};
 
-const SLOT: u64 = 24;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SlotFormat {
+    Compact,
+    FullKey,
+}
 
-#[derive(Clone, Copy, Debug)]
+impl SlotFormat {
+    fn key_width(self) -> usize {
+        match self {
+            Self::Compact => 4,
+            Self::FullKey => 8,
+        }
+    }
+
+    fn width(self) -> u64 {
+        (1 + self.key_width() + 8) as u64
+    }
+
+    fn fits(self, key: i64) -> bool {
+        self == Self::FullKey || i32::try_from(key).is_ok()
+    }
+
+    fn read(self, reader: &mut impl Read) -> std::io::Result<Option<Entry>> {
+        let key_end = 1 + self.key_width();
+        let mut raw = [0; 17];
+        reader.read_exact(&mut raw[..key_end + 8])?;
+        if raw[0] == 0 {
+            return Ok(None);
+        }
+        let key = match self {
+            Self::Compact => i64::from(i32::from_le_bytes(raw[1..5].try_into().unwrap())),
+            Self::FullKey => i64::from_le_bytes(raw[1..9].try_into().unwrap()),
+        };
+        Ok(Some(Entry {
+            key,
+            offset: u64::from_le_bytes(raw[key_end..key_end + 8].try_into().unwrap()),
+            deleted: raw[0] == 2,
+        }))
+    }
+
+    fn write(self, writer: &mut File, entry: Entry) -> Result<()> {
+        debug_assert!(self.fits(entry.key));
+        let key_end = 1 + self.key_width();
+        let mut raw = [0; 17];
+        raw[0] = if entry.deleted { 2 } else { 1 };
+        raw[1..key_end].copy_from_slice(&entry.key.to_le_bytes()[..self.key_width()]);
+        raw[key_end..key_end + 8].copy_from_slice(&entry.offset.to_le_bytes());
+        writer.write_all(&raw[..key_end + 8])?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Entry {
     pub key: i64,
     pub offset: u64,
@@ -19,6 +69,7 @@ pub(crate) struct DiskIndex {
     file: Option<File>,
     capacity: u64,
     len: u64,
+    format: SlotFormat,
 }
 
 fn hash(key: i64) -> u64 {
@@ -27,19 +78,16 @@ fn hash(key: i64) -> u64 {
     x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     x ^ (x >> 31)
 }
-fn decode(raw: [u8; 24]) -> Option<Entry> {
-    let state = u64::from_le_bytes(raw[0..8].try_into().unwrap());
-    (state != 0).then(|| Entry {
-        key: i64::from_le_bytes(raw[8..16].try_into().unwrap()),
-        offset: u64::from_le_bytes(raw[16..24].try_into().unwrap()),
-        deleted: state == 2,
-    })
-}
 impl DiskIndex {
     pub fn create(path: PathBuf) -> Result<Self> {
-        Self::sized(path, 64)
+        Self::sized(path, 64, SlotFormat::Compact)
     }
-    pub fn sized(path: PathBuf, capacity: u64) -> Result<Self> {
+
+    pub fn empty_like(&self, path: PathBuf) -> Result<Self> {
+        Self::sized(path, self.capacity, self.format)
+    }
+
+    fn sized(path: PathBuf, capacity: u64, format: SlotFormat) -> Result<Self> {
         let file = OpenOptions::new()
             .create(true)
             .truncate(true)
@@ -48,7 +96,7 @@ impl DiskIndex {
             .open(&path)?;
         file.set_len(
             capacity
-                .checked_mul(SLOT)
+                .checked_mul(format.width())
                 .ok_or_else(|| Error::new("resource_limit", "index too large"))?,
         )?;
         Ok(Self {
@@ -56,6 +104,7 @@ impl DiskIndex {
             file: Some(file),
             capacity,
             len: 0,
+            format,
         })
     }
     pub fn reader(&self) -> Result<Self> {
@@ -64,6 +113,7 @@ impl DiskIndex {
             file: Some(File::open(&self.path)?),
             capacity: self.capacity,
             len: self.len,
+            format: self.format,
         })
     }
     // Retain derived slots without retaining an idle writer. Queries open
@@ -78,12 +128,12 @@ impl DiskIndex {
         Ok(self.file.as_mut().expect("index file opened above"))
     }
     pub fn get(&mut self, key: i64) -> Result<Option<Entry>> {
+        let format = self.format;
         let mut slot = hash(key) & (self.capacity - 1);
         for _ in 0..self.capacity {
-            self.file()?.seek(SeekFrom::Start(slot * SLOT))?;
-            let mut raw = [0; 24];
-            self.file()?.read_exact(&mut raw)?;
-            match decode(raw) {
+            let file = self.file()?;
+            file.seek(SeekFrom::Start(slot * format.width()))?;
+            match format.read(file)? {
                 None => return Ok(None),
                 Some(e) if e.key == key => return Ok(Some(e)),
                 _ => {}
@@ -93,36 +143,51 @@ impl DiskIndex {
         Err(Error::new("storage_error", "index has no empty slot"))
     }
     pub fn put(&mut self, entry: Entry) -> Result<()> {
+        self.ensure_key(entry.key)?;
         if self.len * 10 >= self.capacity * 7 {
             self.grow()?;
         }
+        let format = self.format;
         let mut slot = hash(entry.key) & (self.capacity - 1);
         loop {
-            self.file()?.seek(SeekFrom::Start(slot * SLOT))?;
-            let mut raw = [0; 24];
-            self.file()?.read_exact(&mut raw)?;
-            let old = decode(raw);
+            let file = self.file()?;
+            file.seek(SeekFrom::Start(slot * format.width()))?;
+            let old = format.read(file)?;
             if old.is_none_or(|e| e.key == entry.key) {
+                self.write_slot(slot, entry)?;
                 if old.is_none() {
                     self.len += 1;
                 }
-                return self.write_slot(slot, entry);
+                return Ok(());
             }
             slot = (slot + 1) & (self.capacity - 1);
         }
     }
     fn write_slot(&mut self, slot: u64, entry: Entry) -> Result<()> {
-        let mut raw = [0; SLOT as usize];
-        raw[0..8].copy_from_slice(&(if entry.deleted { 2_u64 } else { 1_u64 }).to_le_bytes());
-        raw[8..16].copy_from_slice(&entry.key.to_le_bytes());
-        raw[16..24].copy_from_slice(&entry.offset.to_le_bytes());
+        let format = self.format;
         let file = self.file()?;
-        file.seek(SeekFrom::Start(slot * SLOT))?;
-        file.write_all(&raw)?;
-        Ok(())
+        file.seek(SeekFrom::Start(slot * format.width()))?;
+        format.write(file, entry)
     }
-    pub fn capacity(&self) -> u64 {
-        self.capacity
+
+    fn ensure_key(&mut self, key: i64) -> Result<()> {
+        if self.format.fits(key) {
+            return Ok(());
+        }
+        let path = self
+            .path
+            .with_extension(format!("hash{}-full", self.capacity));
+        let mut next = Self::sized(path, self.capacity, SlotFormat::FullKey)?;
+        let mut reader = BufReader::new(File::open(&self.path)?);
+        // Widen in the same physical slots to retain probe chains and LIMIT order.
+        for slot in 0..self.capacity {
+            if let Some(entry) = self.format.read(&mut reader)? {
+                next.write_slot(slot, entry)?;
+            }
+        }
+        next.len = self.len;
+        drop(reader);
+        self.replace_slots(next)
     }
     fn expanded(&self) -> Result<Self> {
         let capacity = self
@@ -130,7 +195,7 @@ impl DiskIndex {
             .checked_mul(2)
             .ok_or_else(|| Error::new("resource_limit", "index too large"))?;
         let path = self.path.with_extension(format!("hash{capacity}"));
-        Self::sized(path, capacity)
+        Self::sized(path, capacity, self.format)
     }
     fn grow(&mut self) -> Result<()> {
         let mut next = self.expanded()?;
@@ -175,6 +240,7 @@ impl DiskIndex {
         let Some(vacant) = vacant.as_mut() else {
             return self.put(entry);
         };
+        self.ensure_key(entry.key)?;
         let home = hash(entry.key) & (self.capacity - 1);
         let slot = vacant.take(home as usize);
         self.write_slot(slot as u64, entry)?;
@@ -182,7 +248,7 @@ impl DiskIndex {
         Ok(())
     }
     pub fn entries(&self) -> Result<Entries> {
-        Entries::open(&self.path, self.capacity)
+        Entries::open(&self.path, self.capacity, self.format)
     }
     pub fn path(&self) -> &Path {
         &self.path
@@ -225,12 +291,14 @@ impl Vacancy {
 pub(crate) struct Entries {
     reader: BufReader<File>,
     remaining: u64,
+    format: SlotFormat,
 }
 impl Entries {
-    fn open(path: &Path, remaining: u64) -> Result<Self> {
+    fn open(path: &Path, remaining: u64, format: SlotFormat) -> Result<Self> {
         Ok(Self {
             reader: BufReader::new(File::open(path)?),
             remaining,
+            format,
         })
     }
 }
@@ -239,13 +307,13 @@ impl Iterator for Entries {
     fn next(&mut self) -> Option<Self::Item> {
         while self.remaining > 0 {
             self.remaining -= 1;
-            let mut raw = [0; 24];
-            if let Err(e) = self.reader.read_exact(&mut raw) {
-                self.remaining = 0;
-                return Some(Err(e.into()));
-            }
-            if let Some(e) = decode(raw) {
-                return Some(Ok(e));
+            match self.format.read(&mut self.reader) {
+                Ok(Some(entry)) => return Some(Ok(entry)),
+                Ok(None) => {}
+                Err(error) => {
+                    self.remaining = 0;
+                    return Some(Err(error.into()));
+                }
             }
         }
         None
@@ -257,13 +325,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn widening_keeps_full_offsets_tombstones_and_iteration_order() {
+        let root =
+            std::env::temp_dir().join(format!("minivectordb-widen-slots-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let mut index = DiskIndex::create(root.join("slots.index")).unwrap();
+        for (key, offset) in [(-3, u64::MAX), (i64::from(i32::MAX), 0), (1, 1 << 63)] {
+            index
+                .put(Entry {
+                    key,
+                    offset,
+                    deleted: key < 0,
+                })
+                .unwrap();
+        }
+        let original = index
+            .entries()
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(fs::metadata(index.path()).unwrap().len(), 64 * 13);
+        let wide = Entry {
+            key: i64::MIN,
+            offset: 127,
+            deleted: false,
+        };
+        index.put(wide).unwrap();
+        assert_eq!(index.reader().unwrap().get(wide.key).unwrap(), Some(wide));
+        let after = index
+            .entries()
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            after
+                .into_iter()
+                .filter(|entry| entry.key != wide.key)
+                .collect::<Vec<_>>(),
+            original
+        );
+        assert_eq!(fs::metadata(index.path()).unwrap().len(), 64 * 17);
+        drop(index);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn bulk_copy_preserves_slots_through_collisions_and_growth() {
         let root =
             std::env::temp_dir().join(format!("minivectordb-bulk-slots-{}", std::process::id()));
         fs::create_dir(&root).unwrap();
         let mut ordinary = DiskIndex::create(root.join("ordinary.index")).unwrap();
         let mut bulk = DiskIndex::create(root.join("bulk.index")).unwrap();
-        let entries: Vec<_> = (0..120_000_i64)
+        let mut entries: Vec<_> = (0..120_000_i64)
             .filter(|&key| hash(key) & 63 >= 60)
             .take(500)
             .enumerate()
@@ -274,6 +387,14 @@ mod tests {
             })
             .collect();
         assert_eq!(entries.len(), 500);
+        entries.insert(
+            111,
+            Entry {
+                key: i64::MAX,
+                offset: u64::MAX,
+                deleted: false,
+            },
+        );
         for &entry in &entries {
             ordinary.put(entry).unwrap();
         }

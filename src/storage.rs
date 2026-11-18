@@ -1249,8 +1249,8 @@ impl Store {
     // Recreate the old hash insertion order from the authoritative history.
     // Iterating the current live keys would lose collision, resize and tombstone order.
     fn limit_index(&self, table: &str, covering: bool, files: &LimitFiles) -> Result<DiskIndex> {
-        let mut primary = DiskIndex::create(files.0.join("primary.hash"))?;
-        let mut vector = None;
+        let mut index = DiskIndex::create(files.0.join("primary.hash"))?;
+        let mut using_vector = false;
         let mut reader = BufReader::new(File::open(&self.path)?);
         let mut frame = 0;
         let mut block_bytes = Vec::new();
@@ -1283,16 +1283,22 @@ impl Store {
                 let mut tag = [0];
                 reader.read_exact(&mut tag)?;
                 match tag[0] {
-                    0 if covering && vector.is_none() => {
+                    0 if covering && !using_vector => {
                         let schema: Schema = serde_json::from_reader((&mut reader).take(size - 1))?;
                         if schema.name == table && !schema.indexes.is_empty() {
-                            let mut index = DiskIndex::create(files.0.join("vector.hash"))?;
-                            index.copy_distinct(
-                                primary
+                            let mut vector = DiskIndex::create(files.0.join("vector.hash"))?;
+                            vector.copy_distinct(
+                                index
                                     .entries()?
                                     .filter(|entry| !matches!(entry, Ok(slot) if slot.deleted)),
                             )?;
-                            vector = Some(index);
+                            // The primary history only defines the vector index's
+                            // insertion order at CREATE VECTOR INDEX.
+                            let old = std::mem::replace(&mut index, vector);
+                            let path = old.path().to_owned();
+                            drop(old);
+                            fs::remove_file(path)?;
+                            using_vector = true;
                         }
                     }
                     0 => {}
@@ -1312,10 +1318,7 @@ impl Store {
                                     offset,
                                     deleted: tag[0] == 2,
                                 };
-                                primary.put(entry)?;
-                                if let Some(index) = &mut vector {
-                                    index.put(entry)?;
-                                }
+                                index.put(entry)?;
                             }
                         }
                     }
@@ -1337,10 +1340,7 @@ impl Store {
                                     offset: BlockPosition { start: offset, row }.pack()?,
                                     deleted: false,
                                 };
-                                primary.put(entry)?;
-                                if let Some(index) = &mut vector {
-                                    index.put(entry)?;
-                                }
+                                index.put(entry)?;
                             }
                         }
                     }
@@ -1350,17 +1350,10 @@ impl Store {
             }
             frame = end;
         }
-        if covering {
-            let vector = vector.ok_or_else(|| corrupt("covering limit index missing"))?;
-            // Primary slots were needed only to reconstruct the historical
-            // vector insertion order. Close before removal on every platform.
-            let primary_path = primary.path().to_owned();
-            drop(primary);
-            fs::remove_file(primary_path)?;
-            Ok(vector)
-        } else {
-            Ok(primary)
+        if covering && !using_vector {
+            return Err(corrupt("covering limit index missing"));
         }
+        Ok(index)
     }
 
     pub fn vector_view(&self, schema: &Schema, column: usize) -> Result<VectorView> {
