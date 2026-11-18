@@ -6,6 +6,8 @@ MiniVectorDB 是单进程、单客户端的 Rust 数据库。容器从 `/data` �
 
 在本仓库根目录的 Linux 或 WSL Bash 中执行。示例先提交一行、回滚另一行，再用同一数据卷启动新进程，核对普通查询与向量检索结果。
 
+首次构建从 Docker Hub 拉取锁定的 Debian 基础层，从 Rust 和 Debian 的官方地址获取按 SHA-256 固定的构建组件。解包和 Cargo 编译在断网阶段执行。运行镜像仅包含程序和所需动态库。
+
 ```bash
 image=minivectordb:local
 docker build --platform linux/amd64 -t "$image" .
